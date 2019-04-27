@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 #
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
@@ -12,6 +11,7 @@ except ImportError:
     from xml.etree import ElementTree as etree
 
 from ipapython import ipa_log_manager, ipautil
+from ipaplatform.tasks import tasks
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ ENTRYUUID_PREFIX = "/var/lib/ipa/dns/zone/entryUUID/"
 ENTRYUUID_PREFIX_LEN = len(ENTRYUUID_PREFIX)
 
 
-class ZoneListReader(object):
+class ZoneListReader:
     def __init__(self):
         self.names = set()  # dns.name
         self.uuids = set()  # UUID strings
@@ -107,7 +107,7 @@ class LDAPZoneListReader(ZoneListReader):
         super(LDAPZoneListReader, self).__init__()
 
     def process_ipa_zone(self, op, uuid, zone_ldap):
-        assert (op == 'add' or op == 'del'), 'unsupported op %s' % op
+        assert (op in ['add', 'del']), 'unsupported op %s' % op
         assert uuid is not None
         assert 'idnsname' in zone_ldap, \
             'LDAP zone UUID %s without idnsName' % uuid
@@ -120,7 +120,7 @@ class LDAPZoneListReader(ZoneListReader):
             self._del_zone(zone_ldap['idnsname'][0], uuid)
 
 
-class ODSMgr(object):
+class ODSMgr:
     """OpenDNSSEC zone manager. It does LDAP->ODS synchronization.
 
     Zones with idnsSecInlineSigning attribute = TRUE in LDAP are added
@@ -131,12 +131,11 @@ class ODSMgr(object):
         self.zl_ldap = LDAPZoneListReader()
 
     def ksmutil(self, params):
-        """Call ods-ksmutil with given parameters and return stdout.
+        """Call ods-ksmutil / ods-enforcer with parameters and return stdout.
 
         Raises CalledProcessError if returncode != 0.
         """
-        cmd = ['ods-ksmutil'] + params
-        result = ipautil.run(cmd, capture_output=True)
+        result = tasks.run_ods_manager(params, capture_output=True)
         return result.output
 
     def get_ods_zonelist(self):
@@ -178,7 +177,7 @@ class ODSMgr(object):
 
         Change is only recorded to memory.
         self.sync() have to be called to synchronize change to ODS."""
-        assert op == 'add' or op == 'del'
+        assert op in ('add', 'del')
         self.zl_ldap.process_ipa_zone(op, uuid, attrs)
         logger.debug("LDAP zones: %s", self.zl_ldap.mapping)
 

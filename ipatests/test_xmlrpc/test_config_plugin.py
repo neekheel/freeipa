@@ -148,8 +148,12 @@ class test_config(Declarative):
 
         dict(
             desc='Try to set new selinux order and invalid default user',
-            command=('config_mod', [],
-                dict(ipaselinuxusermaporder=u'xguest_u:s0$guest_u:s0$user_u:s0-s0:c0.c1023$staff_u:s0-s0:c0.c1023$unconfined_u:s0-s0:c0.c1023',
+            command=(
+                'config_mod', [],
+                dict(
+                    ipaselinuxusermaporder=u'xguest_u:s0$guest_u:s0'
+                    u'$user_u:s0-s0:c0.c1023$staff_u:s0-s0:c0.c1023'
+                    u'$sysadm_u:s0-s0:c0.c1023$unconfined_u:s0-s0:c0.c1023',
                     ipaselinuxusermapdefault=u'unknown_u:s0')),
             expected=errors.ValidationError(name='ipaselinuxusermapdefault',
                 error='SELinux user map default user not in order list'),
@@ -226,5 +230,81 @@ class test_config(Declarative):
                     "single label domains are not supported").format(
                         sl_domain),
             ),
+        ),
+        dict(
+            desc='Set the number of search records to -1 (unlimited)',
+            command=(
+                'config_mod', [], {
+                    'ipasearchrecordslimit': u'-1',
+                },
+            ),
+            expected={
+                'result': lambda d: d['ipasearchrecordslimit'] == (u'-1',),
+                'summary': None,
+                'value': None,
+            },
+        ),
+        dict(
+            desc='Set the number of search records to greater than 10',
+            command=(
+                'config_mod', [], {
+                    'ipasearchrecordslimit': u'100',
+                },
+            ),
+            expected={
+                'result': lambda d: d['ipasearchrecordslimit'] == (u'100',),
+                'summary': None,
+                'value': None,
+            },
+        ),
+        dict(
+            desc='Set the number of search records to lower than -1',
+            command=(
+                'config_mod', [], {
+                    'ipasearchrecordslimit': u'-10',
+                },
+            ),
+            expected=errors.ValidationError(
+                name=u'searchrecordslimit',
+                error=u'must be at least 10',
+            ),
+        ),
+        dict(
+            desc='Set the number of search records to lower than 10',
+            command=(
+                'config_mod', [], {
+                    'ipasearchrecordslimit': u'1',
+                },
+            ),
+            expected=errors.ValidationError(
+                name=u'searchrecordslimit',
+                error=u'must be at least 10',
+            ),
+        ),
+        dict(
+            desc='Set the number of search records to zero (unlimited)',
+            command=(
+                'config_mod', [], {
+                    'ipasearchrecordslimit': u'0',
+                },
+            ),
+            expected={
+                'result': lambda d: d['ipasearchrecordslimit'] == (u'-1',),
+                'summary': None,
+                'value': None,
+            },
+        ),
+        dict(
+            desc='Set the number of search records back to 100',
+            command=(
+                'config_mod', [], {
+                    'ipasearchrecordslimit': u'100',
+                },
+            ),
+            expected={
+                'result': lambda d: d['ipasearchrecordslimit'] == (u'100',),
+                'summary': None,
+                'value': None,
+            },
         ),
     ]

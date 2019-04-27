@@ -145,10 +145,14 @@ DEFAULT_CONFIG = (
     ('tls_version_min', 'tls1.0'),
     ('tls_version_max', 'tls1.2'),
 
-    # Time to wait for a service to start, in seconds
-    ('startup_timeout', 300),
+    # Time to wait for a service to start, in seconds.
+    # Note that systemd has a DefaultTimeoutStartSec of 90 seconds. Higher
+    # values are not effective unless systemd is reconfigured, too.
+    ('startup_timeout', 120),
     # How long http connection should wait for reply [seconds].
     ('http_timeout', 30),
+    # How long to wait for an entry to appear on a replica
+    ('replication_wait_timeout', 300),
 
     # Web Application mount points
     ('mount_ipa', '/ipa/'),
@@ -223,7 +227,7 @@ DEFAULT_CONFIG = (
     ('site_packages', object),  # The directory contaning ipalib
     ('script', object),  # sys.argv[0]
     ('bin', object),  # The directory containing the script
-    ('home', object),  # $HOME
+    ('home', object),  # os.path.expanduser('~')
 
     # Vars set in Env._bootstrap():
     ('in_tree', object),  # Whether or not running in-tree (bool)
@@ -253,7 +257,7 @@ SID_ANCHOR_PREFIX = ':SID:'
 DOMAIN_LEVEL_0 = 0  # compat
 DOMAIN_LEVEL_1 = 1  # replica promotion, topology plugin
 
-MIN_DOMAIN_LEVEL = DOMAIN_LEVEL_0
+MIN_DOMAIN_LEVEL = DOMAIN_LEVEL_1
 MAX_DOMAIN_LEVEL = DOMAIN_LEVEL_1
 
 # Constants used in generation of replication agreements and as topology
@@ -286,7 +290,9 @@ RENEWAL_REUSE_CA_NAME = 'dogtag-ipa-ca-renew-agent-reuse'
 CA_DBUS_TIMEOUT = 120
 
 # regexp definitions
-PATTERN_GROUPUSER_NAME = '^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*[a-zA-Z0-9_.$-]?$'
+PATTERN_GROUPUSER_NAME = (
+    '(?!^[0-9]+$)^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*[a-zA-Z0-9_.$-]?$'
+)
 
 # Kerberos Anonymous principal name
 ANON_USER = 'WELLKNOWN/ANONYMOUS'
@@ -305,17 +311,17 @@ TLS_VERSIONS = [
 ]
 TLS_VERSION_MINIMAL = "tls1.0"
 
+# minimum SASL secure strength factor for LDAP connections
+# 56 provides backwards compatibility with old libraries.
+LDAP_SSF_MIN_THRESHOLD = 56
 
 # Use cache path
 USER_CACHE_PATH = (
     os.environ.get('XDG_CACHE_HOME') or
-    os.path.join(
-        os.environ.get(
-            'HOME',
-            os.path.expanduser('~')
-        ),
-        '.cache'
-    )
+    os.path.expanduser('~/.cache')
 )
 
 SOFTHSM_DNSSEC_TOKEN_LABEL = u'ipaDNSSEC'
+# Apache's mod_ssl SSLVerifyDepth value (Maximum depth of CA
+# Certificates in Client Certificate verification)
+MOD_SSL_VERIFY_DEPTH = '5'

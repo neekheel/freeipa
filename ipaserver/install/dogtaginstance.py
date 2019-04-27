@@ -17,8 +17,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import base64
 import logging
+import time
 
 import ldap
 import os
@@ -26,22 +29,29 @@ import shutil
 import traceback
 import dbus
 
+from configparser import DEFAULTSECT, ConfigParser, RawConfigParser
+
+import six
+
 from pki.client import PKIConnection
 import pki.system
 
 from ipalib import api, errors, x509
 from ipalib.install import certmonger
-from ipalib.constants import CA_DBUS_TIMEOUT
+from ipalib.constants import CA_DBUS_TIMEOUT, IPA_CA_RECORD
 from ipaplatform import services
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
+from ipapython import directivesetter
 from ipapython import ipaldap
 from ipapython import ipautil
 from ipapython.dn import DN
 from ipaserver.install import service
-from ipaserver.install import installutils
+from ipaserver.install import sysupgrade
 from ipaserver.install import replication
 from ipaserver.install.installutils import stopped_service
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +98,20 @@ class DogtagInstance(service.Service):
     tracking_reqs = None
     server_cert_name = None
 
+    # token for CA and subsystem certificates. For now, only internal token
+    # is supported.
+    token_name = "internal"
+
+    ipaca_groups = DN(('ou', 'groups'), ('o', 'ipaca'))
+    ipaca_people = DN(('ou', 'people'), ('o', 'ipaca'))
+    groups_aci = (
+        b'(targetfilter="(objectClass=groupOfUniqueNames)")'
+        b'(targetattr="cn || description || objectclass || uniquemember")'
+        b'(version 3.0; acl "Allow users from o=ipaca to read groups"; '
+        b'allow (read, search, compare) '
+        b'userdn="ldap:///uid=*,ou=people,o=ipaca";)'
+    )
+
     def __init__(self, realm, subsystem, service_desc, host_name=None,
                  nss_db=paths.PKI_TOMCAT_ALIAS_DIR, service_prefix=None,
                  config=None):
@@ -106,20 +130,24 @@ class DogtagInstance(service.Service):
         self.pkcs12_info = None
         self.clone = False
 
-        self.basedn = DN(('o', 'ipa%s' % subsystem.lower()))
+        self.basedn = None
         self.admin_user = "admin"
-        self.admin_dn = DN(('uid', self.admin_user),
-                           ('ou', 'people'), ('o', 'ipaca'))
+        self.admin_dn = DN(
+            ('uid', self.admin_user), self.ipaca_people
+        )
         self.admin_groups = None
         self.tmp_agent_db = None
         self.subsystem = subsystem
-        self.security_domain_name = "IPA"
         # replication parameters
         self.master_host = None
-        self.master_replication_port = None
-        self.subject_base = None
+        self.master_replication_port = 389
         self.nss_db = nss_db
         self.config = config  # Path to CS.cfg
+
+        # filled out by configure_instance
+        self.pki_config_override = None
+        self.ca_subject = None
+        self.subject_base = None
 
     def is_installed(self):
         """
@@ -153,11 +181,13 @@ class DogtagInstance(service.Service):
 
     def clean_pkispawn_files(self):
         if self.tmp_agent_db is not None:
+            logger.debug("Removing %s", self.tmp_agent_db)
             shutil.rmtree(self.tmp_agent_db, ignore_errors=True)
 
-        shutil.rmtree('/root/.dogtag/pki-tomcat/{subsystem}/'
-                      .format(subsystem=self.subsystem.lower()),
-                      ignore_errors=True)
+        client_dir = os.path.join(
+            '/root/.dogtag/pki-tomcat/', self.subsystem.lower())
+        logger.debug("Removing %s", client_dir)
+        shutil.rmtree(client_dir, ignore_errors=True)
 
     def restart_instance(self):
         self.restart('pki-tomcat')
@@ -178,43 +208,49 @@ class DogtagInstance(service.Service):
         """
         Enable client auth connection to the internal db.
         """
+        sub_system_nickname = "subsystemCert cert-pki-ca"
+        if self.token_name != "internal":
+            # TODO: Dogtag 10.6.9 does not like "internal" prefix.
+            sub_system_nickname = '{}:{}'.format(
+                self.token_name, sub_system_nickname
+            )
 
         with stopped_service('pki-tomcatd', 'pki-tomcat'):
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 'authz.instance.DirAclAuthz.ldap.ldapauth.authtype',
                 'SslClientAuth', quotes=False, separator='=')
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 'authz.instance.DirAclAuthz.ldap.ldapauth.clientCertNickname',
-                'subsystemCert cert-pki-ca', quotes=False, separator='=')
-            installutils.set_directive(
+                sub_system_nickname, quotes=False, separator='=')
+            directivesetter.set_directive(
                 self.config,
                 'authz.instance.DirAclAuthz.ldap.ldapconn.port', '636',
                 quotes=False, separator='=')
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 'authz.instance.DirAclAuthz.ldap.ldapconn.secureConn',
                 'true', quotes=False, separator='=')
 
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 'internaldb.ldapauth.authtype',
                 'SslClientAuth', quotes=False, separator='=')
 
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 'internaldb.ldapauth.clientCertNickname',
-                'subsystemCert cert-pki-ca', quotes=False, separator='=')
-            installutils.set_directive(
+                sub_system_nickname, quotes=False, separator='=')
+            directivesetter.set_directive(
                 self.config,
                 'internaldb.ldapconn.port', '636', quotes=False, separator='=')
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 'internaldb.ldapconn.secureConn', 'true', quotes=False,
                 separator='=')
             # Remove internaldb password as is not needed anymore
-            installutils.set_directive(paths.PKI_TOMCAT_PASSWORD_CONF,
+            directivesetter.set_directive(paths.PKI_TOMCAT_PASSWORD_CONF,
                                        'internaldb', None, separator='=')
 
     def uninstall(self):
@@ -250,7 +286,9 @@ class DogtagInstance(service.Service):
         """
         cmonger = services.knownservices.certmonger
         cmonger.enable()
-        services.knownservices.messagebus.start()
+        if not services.knownservices.dbus.is_running():
+            # some platforms protect dbus with RefuseManualStart=True
+            services.knownservices.dbus.start()
         cmonger.start()
 
         bus = dbus.SystemBus()
@@ -269,9 +307,9 @@ class DogtagInstance(service.Service):
                     # Give dogtag extra time to generate cert
                     timeout=CA_DBUS_TIMEOUT)
 
-    def __get_pin(self):
+    def __get_pin(self, token_name="internal"):
         try:
-            return certmonger.get_pin('internal')
+            return certmonger.get_pin(token_name)
         except IOError as e:
             logger.debug(
                 'Unable to determine PIN for the Dogtag instance: %s', e)
@@ -279,7 +317,7 @@ class DogtagInstance(service.Service):
 
     def configure_renewal(self):
         """ Configure certmonger to renew system certs """
-        pin = self.__get_pin()
+        pin = self.__get_pin(self.token_name)
 
         for nickname in self.tracking_reqs:
             try:
@@ -287,6 +325,7 @@ class DogtagInstance(service.Service):
                     certpath=self.nss_db,
                     ca='dogtag-ipa-ca-renew-agent',
                     nickname=nickname,
+                    token_name=self.token_name,
                     pin=pin,
                     pre_command='stop_pkicad',
                     post_command='renew_ca_cert "%s"' % nickname,
@@ -301,15 +340,19 @@ class DogtagInstance(service.Service):
         done by the renewal script, renew_ca_cert once all the subsystem
         certificates are renewed.
         """
-        pin = self.__get_pin()
+        # server cert is always stored in internal token
+        token_name = "internal"
+        pin = self.__get_pin(token_name)
         try:
             certmonger.start_tracking(
                 certpath=self.nss_db,
                 ca='dogtag-ipa-ca-renew-agent',
                 nickname=self.server_cert_name,
+                token_name=token_name,
                 pin=pin,
                 pre_command='stop_pkicad',
-                post_command='renew_ca_cert "%s"' % self.server_cert_name)
+                post_command='renew_ca_cert "%s"' % self.server_cert_name
+            )
         except RuntimeError as e:
             logger.error(
                 "certmonger failed to start tracking certificate: %s", e)
@@ -317,12 +360,14 @@ class DogtagInstance(service.Service):
     def stop_tracking_certificates(self, stop_certmonger=True):
         """Stop tracking our certificates. Called on uninstall.
         """
-        self.print_msg(
+        logger.debug(
             "Configuring certmonger to stop tracking system certificates "
-            "for %s" % self.subsystem)
+            "for %s", self.subsystem)
 
         cmonger = services.knownservices.certmonger
-        services.knownservices.messagebus.start()
+        if not services.knownservices.dbus.is_running():
+            # some platforms protect dbus with RefuseManualStart=True
+            services.knownservices.dbus.start()
         cmonger.start()
 
         nicknames = list(self.tracking_reqs)
@@ -351,7 +396,7 @@ class DogtagInstance(service.Service):
         """
 
         with stopped_service('pki-tomcatd', 'pki-tomcat'):
-            installutils.set_directive(
+            directivesetter.set_directive(
                 self.config,
                 directive,
                 # the cert must be only the base64 string without headers
@@ -369,8 +414,7 @@ class DogtagInstance(service.Service):
         conn = None
 
         try:
-            ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=self.realm)
-            conn = ipaldap.LDAPClient(ldap_uri)
+            conn = ipaldap.LDAPClient.from_realm(self.realm)
             conn.external_bind()
 
             entry_attrs = conn.get_entry(self.admin_dn, ['usercertificate'])
@@ -392,27 +436,31 @@ class DogtagInstance(service.Service):
 
         raise RuntimeError("%s configuration failed." % self.subsystem)
 
-    def __add_admin_to_group(self, group):
-        dn = DN(('cn', group), ('ou', 'groups'), ('o', 'ipaca'))
-        entry = api.Backend.ldap2.get_entry(dn)
-        members = entry.get('uniqueMember', [])
-        members.append(self.admin_dn)
-        mod = [(ldap.MOD_REPLACE, 'uniqueMember', members)]
+    def add_ipaca_aci(self):
+        """Add ACI to allow ipaca users to read their own group information
+
+        Dogtag users aren't allowed to enumerate their own groups. The
+        setup_admin() method needs the permission to wait, until all group
+        information has been replicated.
+        """
+        dn = self.ipaca_groups
+        mod = [(ldap.MOD_ADD, 'aci', [self.groups_aci])]
         try:
             api.Backend.ldap2.modify_s(dn, mod)
         except ldap.TYPE_OR_VALUE_EXISTS:
-            # already there
-            pass
+            logger.debug("%s already has ACI to read group information", dn)
+        else:
+            logger.debug("Added ACI to read groups to %s", dn)
 
     def setup_admin(self):
         self.admin_user = "admin-%s" % self.fqdn
         self.admin_password = ipautil.ipa_generate_password()
-        self.admin_dn = DN(('uid', self.admin_user),
-                           ('ou', 'people'), ('o', 'ipaca'))
-
+        self.admin_dn = DN(
+            ('uid', self.admin_user), self.ipaca_people
+        )
         # remove user if left-over exists
         try:
-            entry = api.Backend.ldap2.delete_entry(self.admin_dn)
+            api.Backend.ldap2.delete_entry(self.admin_dn)
         except errors.NotFound:
             pass
 
@@ -431,18 +479,58 @@ class DogtagInstance(service.Service):
         )
         api.Backend.ldap2.add_entry(entry)
 
+        wait_groups = []
         for group in self.admin_groups:
-            self.__add_admin_to_group(group)
+            group_dn = DN(('cn', group), self.ipaca_groups)
+            mod = [(ldap.MOD_ADD, 'uniqueMember', [self.admin_dn])]
+            try:
+                api.Backend.ldap2.modify_s(group_dn, mod)
+            except ldap.TYPE_OR_VALUE_EXISTS:
+                # already there
+                return None
+            else:
+                wait_groups.append(group_dn)
 
         # Now wait until the other server gets replicated this data
-        ldap_uri = ipaldap.get_ldap_uri(self.master_host)
-        master_conn = ipaldap.LDAPClient(ldap_uri)
-        master_conn.gssapi_bind()
-        replication.wait_for_entry(master_conn, entry.dn)
-        del master_conn
+        master_conn = ipaldap.LDAPClient.from_hostname_secure(
+            self.master_host
+        )
+        logger.debug(
+            "Waiting for %s to appear on %s", self.admin_dn, master_conn
+        )
+        deadline = time.time() + api.env.replication_wait_timeout
+        while time.time() < deadline:
+            time.sleep(1)
+            try:
+                master_conn.simple_bind(self.admin_dn, self.admin_password)
+            except errors.ACIError:
+                # user not replicated yet
+                pass
+            else:
+                logger.debug("Successfully logged in as %s", self.admin_dn)
+                break
+        else:
+            logger.error(
+                "Unable to log in as %s on %s", self.admin_dn, master_conn
+            )
+            raise errors.NotFound(
+                reason="{} did not replicate to {}".format(
+                    self.admin_dn, master_conn
+                )
+            )
+
+        # wait for group membership
+        for group_dn in wait_groups:
+            replication.wait_for_entry(
+                master_conn,
+                group_dn,
+                timeout=api.env.replication_wait_timeout,
+                attr='uniqueMember',
+                attrvalue=self.admin_dn
+            )
 
     def __remove_admin_from_group(self, group):
-        dn = DN(('cn', group), ('ou', 'groups'), ('o', 'ipaca'))
+        dn = DN(('cn', group), self.ipaca_groups)
         mod = [(ldap.MOD_DELETE, 'uniqueMember', self.admin_dn)]
         try:
             api.Backend.ldap2.modify_s(dn, mod)
@@ -454,16 +542,6 @@ class DogtagInstance(service.Service):
         for group in self.admin_groups:
             self.__remove_admin_from_group(group)
         api.Backend.ldap2.delete_entry(self.admin_dn)
-
-    def _use_ldaps_during_spawn(self, config, ds_cacert=paths.IPA_CA_CRT):
-        """
-        config is a RawConfigParser object
-        cs_cacert is path to a PEM CA certificate
-        """
-        config.set(self.subsystem, "pki_ds_ldaps_port", "636")
-        config.set(self.subsystem, "pki_ds_secure_connection", "True")
-        config.set(self.subsystem, "pki_ds_secure_connection_ca_pem_file",
-                   ds_cacert)
 
     def backup_config(self):
         """
@@ -478,3 +556,401 @@ class DogtagInstance(service.Service):
         # shutil.copy() doesn't copy owner
         s = os.stat(config)
         os.chown(bak, s.st_uid, s.st_gid)
+
+    def reindex_task(self, force=False):
+        """Reindex ipaca entries
+
+        pkispawn sometimes does not run its indextasks. This leads to slow
+        unindexed filters on attributes such as description, which is used
+        to log in with a certificate. Explicitly reindex attribute that
+        should have been reindexed by CA's indextasks.ldif.
+
+        See https://pagure.io/dogtagpki/issue/3083
+        """
+        state_name = 'reindex_task'
+        if not force and sysupgrade.get_upgrade_state('dogtag', state_name):
+            return
+
+        cn = "indextask_ipaca_{}".format(int(time.time()))
+        dn = DN(
+            ('cn', cn), ('cn', 'index'), ('cn', 'tasks'), ('cn', 'config')
+        )
+        entry = api.Backend.ldap2.make_entry(
+            dn,
+            objectClass=['top', 'extensibleObject'],
+            cn=[cn],
+            nsInstance=['ipaca'],  # Dogtag PKI database
+            nsIndexAttribute=[
+                # from pki/base/ca/shared/conf/indextasks.ldif
+                'archivedBy', 'certstatus', 'clientId', 'dataType',
+                'dateOfCreate', 'description', 'duration', 'extension',
+                'issuedby', 'issuername', 'metaInfo', 'notafter',
+                'notbefore', 'ownername', 'publicKeyData', 'requestid',
+                'requestowner', 'requestsourceid', 'requeststate',
+                'requesttype', 'revInfo', 'revokedOn', 'revokedby',
+                'serialno', 'status', 'subjectname',
+            ],
+            ttl=[10],
+        )
+        logger.debug('Creating ipaca reindex task %s', dn)
+        api.Backend.ldap2.add_entry(entry)
+        logger.debug('Waiting for task...')
+        exitcode = replication.wait_for_task(api.Backend.ldap2, dn)
+        logger.debug(
+            'Task %s has finished with exit code %i',
+            dn, exitcode
+        )
+        sysupgrade.set_upgrade_state('dogtag', state_name, True)
+
+    def _configure_clone(self, subsystem_config, security_domain_hostname,
+                         clone_pkcs12_path):
+        subsystem_config.update(
+            # Security domain registration
+            pki_security_domain_hostname=security_domain_hostname,
+            pki_security_domain_https_port=443,
+            pki_security_domain_user=self.admin_user,
+            pki_security_domain_password=self.admin_password,
+            # Clone
+            pki_clone=True,
+            pki_clone_pkcs12_path=clone_pkcs12_path,
+            pki_clone_pkcs12_password=self.dm_password,
+            pki_clone_replication_security="TLS",
+            pki_clone_replication_master_port=self.master_replication_port,
+            pki_clone_replication_clone_port=389,
+            pki_clone_replicate_schema=False,
+            pki_clone_uri="https://%s" % ipautil.format_netloc(
+                self.master_host, 443),
+        )
+
+    def _create_spawn_config(self, subsystem_config):
+        loader = PKIIniLoader(
+            subsystem=self.subsystem,
+            fqdn=self.fqdn,
+            domain=api.env.domain,
+            subject_base=self.subject_base,
+            ca_subject=self.ca_subject,
+            admin_user=self.admin_user,
+            admin_password=self.admin_password,
+            dm_password=self.dm_password,
+            pki_config_override=self.pki_config_override
+        )
+        return loader.create_spawn_config(subsystem_config)
+
+
+class PKIIniLoader:
+    # supported subsystems
+    subsystems = ('CA', 'KRA')
+    # default, hard-coded, and immutable settings
+    ipaca_default = os.path.join(
+        paths.USR_SHARE_IPA_DIR, 'ipaca_default.ini'
+    )
+    # customizable settings
+    ipaca_customize = os.path.join(
+        paths.USR_SHARE_IPA_DIR, 'ipaca_customize.ini'
+    )
+    # keys that may be stored in a HSM token
+    token_stanzas = (
+        'pki_audit_signing_token',
+        'pki_subsystem_token',
+        'pki_ca_signing_token',
+        'pki_ocsp_signing_token',
+        'pki_storage_token',
+        'pki_transport_token',
+    )
+    # Set of immutable keys, initialized on demand
+    _immutable_keys = None
+    # Set of immutable config keys that are defined in dynamic code instead
+    # of ipaca_default config file.
+    _immutable_code_keys = frozenset({
+        # dogtaginstance
+        'pki_admin_password',
+        'pki_ds_password',
+        'pki_dns_domainname',
+        'pki_hostname',
+        'pki_subsystem',
+        'pki_subsystem_type',
+        # clone settings
+        'pki_security_domain_hostname',
+        'pki_security_domain_https_port',
+        'pki_security_domain_user',
+        'pki_security_domain_password',
+        'pki_clone',
+        'pki_clone_pkcs12_path',
+        'pki_clone_pkcs12_password',
+        'pki_clone_replication_security',
+        'pki_clone_replication_master_port',
+        'pki_clone_replication_clone_port',
+        'pki_clone_replicate_schema',
+        'pki_clone_uri',
+        # cainstance
+        'pki_ds_secure_connection',
+        'pki_server_database_password',
+        'pki_ds_create_new_db',
+        'pki_clone_setup_replication',
+        'pki_clone_reindex_data',
+        'pki_external',
+        'pki_ca_signing_csr_path',
+        'pki_ca_signing_cert_path',
+        'pki_cert_chain_path',
+        'pki_external_step_two',
+        # krainstance
+        'pki_issuing_ca_uri',
+        'pki_client_database_dir',
+        'pki_client_database_password',
+        'pki_client_database_purge',
+        'pki_client_pkcs12_password',
+        'pki_import_admin_cert',
+        'pki_client_admin_cert_p12',
+    })
+
+    def __init__(self, subsystem, fqdn, domain,
+                 subject_base, ca_subject, admin_user, admin_password,
+                 dm_password, pki_config_override=None):
+        self.pki_config_override = pki_config_override
+        self.defaults = dict(
+            # pretty much static
+            ipa_ca_pem_file=paths.IPA_CA_CRT,
+            # variable
+            ipa_ca_subject=ca_subject,
+            ipa_subject_base=subject_base,
+            ipa_fqdn=fqdn,
+            ipa_ocsp_uri="http://{}.{}/ca/ocsp".format(
+                IPA_CA_RECORD, ipautil.format_netloc(domain)),
+            ipa_admin_cert_p12=paths.DOGTAG_ADMIN_P12,
+            ipa_admin_user=admin_user,
+            pki_admin_password=admin_password,
+            pki_ds_password=dm_password,
+            # Dogtag's pkiparser defines these config vars by default:
+            pki_dns_domainname=domain,
+            pki_hostname=fqdn,
+            pki_subsystem=subsystem.upper(),
+            pki_subsystem_type=subsystem.lower(),
+            home_dir=os.path.expanduser("~"),
+            # for softhsm2 testing
+            softhsm2_so=paths.LIBSOFTHSM2_SO
+        )
+
+    @classmethod
+    def get_immutable_keys(cls):
+        """Get set of immutable keys
+
+        Immutable keys are calculated from 'ipaca_default' config file
+        and known keys that are defined in code.
+        """
+        if cls._immutable_keys is None:
+            immutable = set()
+            immutable.update(cls._immutable_code_keys)
+            cfg = RawConfigParser()
+            with open(cls.ipaca_default) as f:
+                cfg.read_file(f)
+            for section in cls.subsystems:
+                for k, _v in cfg.items(section, raw=True):
+                    if k.startswith('pki_'):
+                        immutable.add(k)
+            cls._immutable_keys = frozenset(immutable)
+        return cls._immutable_keys
+
+    @classmethod
+    def verify_pki_config_override(cls, filename):
+        """Verify pki config override file
+
+        * filename must be an absolute path to an existing file
+        * file must be a valid ini file
+        * ini file must not override immutable settings
+
+        TODO: The checker does not verify config interpolation values, yet.
+        The validator does not have access to all settings.
+
+        :param filename: path to pki.ini
+        """
+        if not os.path.isfile(filename):
+            raise ValueError(
+                "Config file '{}' does not exist.".format(filename)
+            )
+        if not os.path.isabs(filename):
+            raise ValueError(
+                "Config file '{}' is not an absolute path.".format(filename)
+            )
+
+        try:
+            cfg = RawConfigParser()
+            with open(filename) as f:
+                cfg.read_file(f)
+        except Exception as e:
+            raise ValueError(
+                "Invalid config '{}': {}".format(filename, e)
+            )
+
+        immutable_keys = cls.get_immutable_keys()
+        invalid_keys = set()
+        sections = [cfg.default_section]
+        sections.extend(cls.subsystems)
+        for section in sections:
+            if not cfg.has_section(section):
+                continue
+            for k, _v in cfg.items(section, raw=True):
+                if k in immutable_keys:
+                    invalid_keys.add(k)
+
+        if invalid_keys:
+            raise ValueError(
+                "'{}' overrides immutable options: {}".format(
+                    filename, ', '.join(sorted(invalid_keys))
+                )
+            )
+
+    def _mangle_values(self, dct):
+        """Stringify and quote % as %% to avoid interpolation errors
+
+        * booleans are converted to 'True', 'False'
+        * DN and numbers are converted to string
+        * None is turned into empty string ''
+        """
+        result = {}
+        for k, v in dct.items():
+            if isinstance(v, (DN, bool, six.integer_types)):
+                v = six.text_type(v)
+            elif v is None:
+                v = ''
+            result[k] = v.replace('%', '%%')
+        return result
+
+    def _get_default_config(self):
+        """Load default config
+
+        :return: config parser, immutable keys
+        """
+        defaults = self._mangle_values(self.defaults)
+        # create a config template with interpolation support
+        # read base config
+        cfgtpl = ConfigParser(defaults=defaults)
+        cfgtpl.optionxform = str
+        with open(self.ipaca_default) as f:
+            cfgtpl.read_file(f)
+
+        # overwrite defaults with our defaults
+        for key, value in defaults.items():
+            cfgtpl.set(DEFAULTSECT, key, value)
+
+        # all keys in default conf + known keys defined in code are
+        # considered immutable.
+        immutable_keys = set()
+        immutable_keys.update(self._immutable_code_keys)
+        for section_name in self.subsystems:
+            for k, _v in cfgtpl.items(section_name, raw=True):
+                immutable_keys.add(k)
+
+        return cfgtpl, immutable_keys
+
+    def _verify_immutable(self, config, immutable_settings, filename):
+        section_name = self.defaults['pki_subsystem']
+        errs = []
+        for key, isvalue in immutable_settings.items():
+            cfgvalue = config.get(section_name, key)
+            if isvalue != cfgvalue:
+                errs.append(f"{key}: '{cfgvalue}' != '{isvalue}'")
+        if errs:
+            raise ValueError(
+                '{} overrides immutable options:\n{}'.format(
+                    filename, '\n'.join(errors)
+                )
+            )
+
+    def create_spawn_config(self, subsystem_config):
+        """Create config instance
+        """
+        section_name = self.defaults['pki_subsystem']
+        cfgtpl, immutable_keys = self._get_default_config()
+
+        # overwrite CA/KRA config with subsystem settings
+        subsystem_config = self._mangle_values(subsystem_config)
+        for key, value in subsystem_config.items():
+            cfgtpl.set(section_name, key, value)
+
+        # get a mapping of settings that cannot be modified by users
+        immutable_settings = {
+            k: v for k, v in cfgtpl.items(section_name)
+            if k in immutable_keys
+        }
+
+        # add ipaca_customize overlay,
+        # These are settings that can be modified by a user, too. We use
+        # ipaca_customize.ini to set sensible defaults.
+        with open(self.ipaca_customize) as f:
+            cfgtpl.read_file(f)
+
+        # load external overlay from command line
+        if self.pki_config_override is not None:
+            with open(self.pki_config_override) as f:
+                cfgtpl.read_file(f)
+
+        # verify again
+        self._verify_immutable(
+            cfgtpl, immutable_settings, self.pki_config_override
+        )
+
+        # key backup is not compatible with HSM support
+        if (cfgtpl.has_option(section_name, 'pki_hsm_enable') and
+                cfgtpl.getboolean(section_name, 'pki_hsm_enable')):
+            cfgtpl.set(section_name, 'pki_backup_keys', 'False')
+            cfgtpl.set(section_name, 'pki_backup_password', '')
+
+        pki_token_name = cfgtpl.get(section_name, 'pki_token_name')
+        for stanza in self.token_stanzas:
+            if cfgtpl.has_option(section_name, stanza):
+                cfgtpl.set(section_name, stanza, pki_token_name)
+
+        # Next up, get rid of interpolation variables, DEFAULT,
+        # irrelevant sections and unused variables. Only the subsystem
+        # section is copied into a new raw config parser. A raw config
+        # parser is necessary, because ConfigParser.write() write passwords
+        # with '%' in a way, that is not accepted by Dogtag.
+        config = RawConfigParser()
+        config.optionxform = str
+        config.add_section(section_name)
+        for key, value in sorted(cfgtpl.items(section=section_name)):
+            if key.startswith('pki_'):
+                config.set(section_name, key, value)
+
+        return config
+
+
+def test():
+    import sys
+
+    sharedir = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.join(__file__)),
+        os.pardir,
+        os.pardir,
+        'install',
+        'share',
+    ))
+
+    class TestPKIIniLoader(PKIIniLoader):
+        ipaca_default = os.path.join(sharedir, 'ipaca_default.ini')
+        ipaca_customize = os.path.join(sharedir, 'ipaca_customize.ini')
+
+    override = os.path.join(sharedir, 'ipaca_softhsm2.ini')
+
+    base_settings = dict(
+        fqdn='replica.ipa.example',
+        domain='ipa.example',
+        subject_base='o=IPA,o=EXAMPLE',
+        ca_subject='cn=CA,o=IPA,o=EXAMPLE',
+        admin_user='admin',
+        admin_password='Secret1',
+        dm_password='Secret2',
+        pki_config_override=override,
+    )
+
+    for subsystem in TestPKIIniLoader.subsystems:
+        print('-' * 78)
+        loader = TestPKIIniLoader(subsystem=subsystem, **base_settings)
+        loader.verify_pki_config_override(loader.ipaca_customize)
+        loader.verify_pki_config_override(override)
+        config = loader.create_spawn_config({})
+        config.write(sys.stdout, False)
+
+
+if __name__ == '__main__':
+    test()

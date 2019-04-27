@@ -276,9 +276,13 @@ def set_certificate_attrs(entry_attrs):
 
 def check_required_principal(ldap, principal):
     """
-    Raise an error if the host of this prinicipal is an IPA master and one
+    Raise an error if the host of this principal is an IPA master and one
     of the principals required for proper execution.
     """
+    if not principal.is_service:
+        # bypass check if principal is not a service principal,
+        # see https://pagure.io/freeipa/issue/7793
+        return
     try:
         host_is_master(ldap, principal.hostname)
     except errors.ValidationError:
@@ -546,7 +550,7 @@ class service(LDAPObject):
 
     def get_dn(self, *keys, **kwargs):
         key = keys[0]
-        if isinstance(key, six.text_type):
+        if isinstance(key, str):
             key = kerberos.Principal(key)
 
         key = unicode(normalize_principal(key))
@@ -601,9 +605,14 @@ class service_add(LDAPCreate):
     has_output_params = LDAPCreate.has_output_params + output_params
     takes_options = LDAPCreate.takes_options + (
         Flag('force',
-            label=_('Force'),
-            doc=_('force principal name even if not in DNS'),
+             label=_('Force'),
+             doc=_('force principal name even if host not in DNS'),
         ),
+        Flag('skip_host_check',
+             label=_('Skip host check'),
+             doc=_('force service to be created even when host '
+                   'object does not exist to manage it'),
+             ),
     )
 
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
@@ -614,11 +623,12 @@ class service_add(LDAPCreate):
         if principal.is_host and not options['force']:
             raise errors.HostService()
 
-        try:
-            hostresult = self.api.Command['host_show'](hostname)['result']
-        except errors.NotFound:
-            raise errors.NotFound(
-                reason=_("The host '%s' does not exist to add a service to.") %
+        if not options['skip_host_check']:
+            try:
+                hostresult = self.api.Command['host_show'](hostname)['result']
+            except errors.NotFound:
+                raise errors.NotFound(reason=_(
+                    "The host '%s' does not exist to add a service to.") %
                     hostname)
 
         self.obj.validate_ipakrbauthzdata(entry_attrs)
@@ -628,7 +638,7 @@ class service_add(LDAPCreate):
             # really want to discourage creating services for hosts that
             # don't exist in DNS.
             util.verify_host_resolvable(hostname)
-        if not 'managedby' in entry_attrs:
+        if not (options['skip_host_check'] or 'managedby' in entry_attrs):
             entry_attrs['managedby'] = hostresult['dn']
 
         # Enforce ipaKrbPrincipalAlias to aid case-insensitive searches
@@ -703,7 +713,8 @@ class service_mod(LDAPUpdate):
             removed_certs = set(old_certs) - set(certs)
             for cert in removed_certs:
                 rm_certs = api.Command.cert_find(
-                    certificate=cert.public_bytes(x509.Encoding.DER))['result']
+                    certificate=cert.public_bytes(x509.Encoding.DER),
+                    service=keys)['result']
                 revoke_certs(rm_certs)
 
         if certs:
@@ -983,7 +994,9 @@ class service_remove_cert(LDAPRemoveAttributeViaOption):
         assert isinstance(dn, DN)
 
         for cert in options.get('usercertificate', []):
-            revoke_certs(api.Command.cert_find(certificate=cert)['result'])
+            revoke_certs(api.Command.cert_find(
+                certificate=cert,
+                service=keys)['result'])
 
         return dn
 

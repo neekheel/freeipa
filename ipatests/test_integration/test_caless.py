@@ -17,13 +17,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
+import functools
 import logging
 import os
 import tempfile
 import shutil
 import glob
 import contextlib
-import unittest
 
 import pytest
 import six
@@ -33,9 +35,9 @@ from ipapython import ipautil
 from ipaplatform.paths import paths
 from ipapython.dn import DN
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.pytest_plugins.integration import tasks
-from ipatests.pytest_plugins.integration.create_external_ca import ExternalCA
-from ipatests.pytest_plugins.integration import create_caless_pki
+from ipatests.pytest_ipa.integration import tasks
+from ipatests.create_external_ca import ExternalCA
+from ipatests.pytest_ipa.integration import create_caless_pki
 from ipalib.constants import DOMAIN_LEVEL_0
 
 if six.PY3:
@@ -170,7 +172,7 @@ class CALessBase(IntegrationTest):
                        http_pin=_DEFAULT, dirsrv_pin=_DEFAULT, pkinit_pin=None,
                        root_ca_file='root.pem', pkinit_pkcs12_exists=False,
                        pkinit_pkcs12='server-kdc.p12', unattended=True,
-                       stdin_text=None):
+                       stdin_text=None, extra_args=None):
         """Install a CA-less server
 
         Return value is the remote ipa-server-install command
@@ -178,10 +180,18 @@ class CALessBase(IntegrationTest):
         if host is None:
             host = cls.master
 
-        extra_args = ['--http-cert-file', http_pkcs12,
-                      '--dirsrv-cert-file', dirsrv_pkcs12,
-                      '--ca-cert-file', root_ca_file,
-                      '--ip-address', host.ip]
+        destname = functools.partial(os.path.join, host.config.test_dir)
+
+        std_args = [
+            '--http-cert-file', destname(http_pkcs12),
+            '--dirsrv-cert-file', destname(dirsrv_pkcs12),
+            '--ca-cert-file', destname(root_ca_file),
+            '--ip-address', host.ip
+        ]
+        if extra_args:
+            extra_args.extend(std_args)
+        else:
+            extra_args = std_args
 
         if http_pin is _DEFAULT:
             http_pin = cls.cert_password
@@ -197,7 +207,9 @@ class CALessBase(IntegrationTest):
             files_to_copy.append(dirsrv_pkcs12)
         if pkinit_pkcs12_exists:
             files_to_copy.append(pkinit_pkcs12)
-            extra_args.extend(['--pkinit-cert-file', pkinit_pkcs12])
+            extra_args.extend(
+                ['--pkinit-cert-file', destname(pkinit_pkcs12)]
+            )
         else:
             extra_args.append('--no-pkinit')
         for filename in set(files_to_copy):
@@ -252,6 +264,7 @@ class CALessBase(IntegrationTest):
 
         if domain_level is None:
             domain_level = tasks.domainlevel(master)
+        tasks.check_domain_level(domain_level)
         files_to_copy = ['root.pem']
         if http_pkcs12_exists:
             files_to_copy.append(http_pkcs12)
@@ -277,11 +290,20 @@ class CALessBase(IntegrationTest):
 
         extra_args = []
         if http_pkcs12_exists:
-            extra_args.extend(['--http-cert-file', http_pkcs12])
+            extra_args.extend([
+                '--http-cert-file',
+                os.path.join(destination_host.config.test_dir, http_pkcs12)
+            ])
         if dirsrv_pkcs12_exists:
-            extra_args.extend(['--dirsrv-cert-file', dirsrv_pkcs12])
+            extra_args.extend([
+                '--dirsrv-cert-file',
+                os.path.join(destination_host.config.test_dir, dirsrv_pkcs12)
+            ])
         if pkinit_pkcs12_exists and domain_level != DOMAIN_LEVEL_0:
-            extra_args.extend(['--pkinit-cert-file', pkinit_pkcs12])
+            extra_args.extend([
+                '--pkinit-cert-file',
+                os.path.join(destination_host.config.test_dir, pkinit_pkcs12)
+            ])
         else:
             extra_args.append('--no-pkinit')
 
@@ -292,22 +314,12 @@ class CALessBase(IntegrationTest):
         if pkinit_pin is not None:
             extra_args.extend(['--pkinit-pin', dirsrv_pin])
 
-        if domain_level == DOMAIN_LEVEL_0:
-            result = tasks.replica_prepare(master, replica,
-                                           extra_args=extra_args,
-                                           raiseonerr=False,
-                                           stdin_text=stdin_text)
-        else:
-            result = tasks.install_replica(master, replica, setup_ca=False,
-                                           extra_args=extra_args,
-                                           unattended=unattended,
-                                           stdin_text=stdin_text,
-                                           raiseonerr=False)
+        result = tasks.install_replica(master, replica, setup_ca=False,
+                                       extra_args=extra_args,
+                                       unattended=unattended,
+                                       stdin_text=stdin_text,
+                                       raiseonerr=False)
         return result
-
-    def get_replica_filename(self, replica):
-        return os.path.join(replica.config.test_dir,
-                            'replica-info.gpg')
 
     @classmethod
     def create_pkcs12(cls, nickname, filename='server.p12', password=None):
@@ -406,8 +418,8 @@ class TestServerInstall(CALessBase):
 
         result = self.install_server(root_ca_file='does_not_exist')
         assert_error(result,
-                     'Failed to open does_not_exist: No such file '
-                     'or directory')
+                     'Failed to open %s/does_not_exist: No such file '
+                     'or directory' % self.master.config.test_dir)
 
     @server_install_teardown
     def test_unknown_ca(self):
@@ -418,7 +430,8 @@ class TestServerInstall(CALessBase):
 
         result = self.install_server()
         assert_error(result,
-                     'The full certificate chain is not present in server.p12')
+                     'The full certificate chain is not present in '
+                     '%s/server.p12' % self.master.config.test_dir)
 
     @server_install_teardown
     def test_ca_server_cert(self):
@@ -429,9 +442,9 @@ class TestServerInstall(CALessBase):
 
         result = self.install_server()
         assert_error(result,
-                     'The full certificate chain is not present in server.p12')
+                     'The full certificate chain is not present in '
+                     '%s/server.p12' % self.master.config.test_dir)
 
-    @pytest.mark.xfail(reason='Ticket N 6289')
     @server_install_teardown
     def test_ca_2_certs(self):
         "IPA server install with CA PEM file with 2 certificates"
@@ -444,7 +457,13 @@ class TestServerInstall(CALessBase):
                 ca1.write(ca2.read())
 
         result = self.install_server()
-        assert_error(result, 'root.pem contains more than one certificate')
+        assert result.returncode == 0
+        # Check that ca2 has not been added to /etc/ipa/ca.crt
+        # because it is not needed in the cert chain
+        with open(os.path.join(self.cert_dir, self.ca2_crt), 'r') as ca2:
+            ca2_body = ca2.read()
+        result = self.master.run_command(['cat', '/etc/ipa/ca.crt'])
+        assert ca2_body not in result.stdout_text
 
     @server_install_teardown
     def test_nonexistent_http_pkcs12_file(self):
@@ -455,7 +474,8 @@ class TestServerInstall(CALessBase):
 
         result = self.install_server(http_pkcs12='does_not_exist',
                                      http_pkcs12_exists=False)
-        assert_error(result, 'Failed to open does_not_exist')
+        assert_error(result, 'Failed to open %s/does_not_exist' %
+                     self.master.config.test_dir)
 
     @server_install_teardown
     def test_nonexistent_ds_pkcs12_file(self):
@@ -466,7 +486,8 @@ class TestServerInstall(CALessBase):
 
         result = self.install_server(dirsrv_pkcs12='does_not_exist',
                                      dirsrv_pkcs12_exists=False)
-        assert_error(result, 'Failed to open does_not_exist')
+        assert_error(result, 'Failed to open %s/does_not_exist' %
+                     self.master.config.test_dir)
 
     @server_install_teardown
     def test_missing_http_password(self):
@@ -492,7 +513,6 @@ class TestServerInstall(CALessBase):
                      'ipa-server-install: error: You must specify '
                      '--dirsrv-pin with --dirsrv-cert-file')
 
-    @pytest.mark.xfail(reason='freeipa ticket 5378')
     @server_install_teardown
     def test_incorect_http_pin(self):
         "IPA server install with incorrect HTTP PKCS#12 password"
@@ -501,9 +521,9 @@ class TestServerInstall(CALessBase):
         self.prepare_cacert('ca1')
 
         result = self.install_server(http_pin='bad<pin>')
-        assert_error(result, 'incorrect password for pkcs#12 file server.p12')
+        assert_error(result, 'incorrect password for pkcs#12 file %s' %
+                     os.path.join(self.master.config.test_dir, 'server.p12'))
 
-    @pytest.mark.xfail(reason='freeipa ticket 5378')
     @server_install_teardown
     def test_incorect_ds_pin(self):
         "IPA server install with incorrect DS PKCS#12 password"
@@ -512,7 +532,8 @@ class TestServerInstall(CALessBase):
         self.prepare_cacert('ca1')
 
         result = self.install_server(dirsrv_pin='bad<pin>')
-        assert_error(result, 'incorrect password for pkcs#12 file server.p12')
+        assert_error(result, 'incorrect password for pkcs#12 file %s' %
+                     os.path.join(self.master.config.test_dir, 'server.p12'))
 
     @server_install_teardown
     def test_invalid_http_cn(self):
@@ -525,8 +546,9 @@ class TestServerInstall(CALessBase):
         result = self.install_server(http_pkcs12='http.p12',
                                      dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: '
-                     'invalid for server %s' % self.master.hostname)
+                     'The server certificate in %s/http.p12 is not valid: '
+                     'invalid for server %s' %
+                     (self.master.config.test_dir, self.master.hostname))
 
     @server_install_teardown
     def test_invalid_ds_cn(self):
@@ -539,8 +561,9 @@ class TestServerInstall(CALessBase):
         result = self.install_server(http_pkcs12='http.p12',
                                      dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in dirsrv.p12 is not valid: '
-                     'invalid for server %s' % self.master.hostname)
+                     'The server certificate in %s/dirsrv.p12 is not valid: '
+                     'invalid for server %s' %
+                     (self.master.config.test_dir, self.master.hostname))
 
     @server_install_teardown
     def test_expired_http(self):
@@ -553,8 +576,9 @@ class TestServerInstall(CALessBase):
         result = self.install_server(http_pkcs12='http.p12',
                                      dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: {err}'
-                     .format(err=CERT_EXPIRED_MSG))
+                     'The server certificate in {dir}/http.p12 is not valid: '
+                     '{err}'.format(dir=self.master.config.test_dir,
+                                    err=CERT_EXPIRED_MSG))
 
     @server_install_teardown
     def test_expired_ds(self):
@@ -567,8 +591,9 @@ class TestServerInstall(CALessBase):
         result = self.install_server(http_pkcs12='http.p12',
                                      dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in dirsrv.p12 is not valid: {err}'
-                     .format(err=CERT_EXPIRED_MSG))
+                     'The server certificate in {dir}/dirsrv.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=CERT_EXPIRED_MSG))
 
     @server_install_teardown
     def test_http_bad_usage(self):
@@ -581,8 +606,9 @@ class TestServerInstall(CALessBase):
         result = self.install_server(http_pkcs12='http.p12',
                                      dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: {err}'
-                     .format(err=BAD_USAGE_MSG))
+                     'The server certificate in {dir}/http.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=BAD_USAGE_MSG))
 
     @server_install_teardown
     def test_ds_bad_usage(self):
@@ -595,44 +621,9 @@ class TestServerInstall(CALessBase):
         result = self.install_server(http_pkcs12='http.p12',
                                      dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in dirsrv.p12 is not valid: {err}'
-                     .format(err=BAD_USAGE_MSG))
-
-    @server_install_teardown
-    def test_revoked_http(self):
-        "IPA server install with revoked HTTP certificate"
-
-        self.create_pkcs12('ca1/server-revoked', filename='http.p12')
-        self.create_pkcs12('ca1/server', filename='dirsrv.p12')
-        self.prepare_cacert('ca1')
-
-        result = self.install_server(http_pkcs12='http.p12',
-                                     dirsrv_pkcs12='dirsrv.p12')
-
-        if result.returncode == 0:
-            raise unittest.SkipTest(
-                "Known CA-less installation defect, see "
-                "https://fedorahosted.org/freeipa/ticket/4270")
-
-        assert result.returncode > 0
-
-    @server_install_teardown
-    def test_revoked_ds(self):
-        "IPA server install with revoked DS certificate"
-
-        self.create_pkcs12('ca1/server', filename='http.p12')
-        self.create_pkcs12('ca1/server-revoked', filename='dirsrv.p12')
-        self.prepare_cacert('ca1')
-
-        result = self.install_server(http_pkcs12='http.p12',
-                                     dirsrv_pkcs12='dirsrv.p12')
-
-        if result.returncode == 0:
-            raise unittest.SkipTest(
-                "Known CA-less installation defect, see "
-                "https://fedorahosted.org/freeipa/ticket/4270")
-
-        assert result.returncode > 0
+                     'The server certificate in {dir}/dirsrv.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=BAD_USAGE_MSG))
 
     @server_install_teardown
     def test_http_intermediate_ca(self):
@@ -826,7 +817,8 @@ class TestReplicaInstall(CALessBase):
 
         result = self.prepare_replica(dirsrv_pkcs12='does_not_exist',
                                       http_pkcs12='http.p12')
-        assert_error(result, 'Failed to open does_not_exist')
+        assert_error(result, 'Failed to open %s/does_not_exist' %
+                     self.master.config.test_dir)
 
     @replica_install_teardown
     def test_nonexistent_ds_pkcs12_file(self):
@@ -836,9 +828,9 @@ class TestReplicaInstall(CALessBase):
 
         result = self.prepare_replica(http_pkcs12='does_not_exist',
                                       dirsrv_pkcs12='dirsrv.p12')
-        assert_error(result, 'Failed to open does_not_exist')
+        assert_error(result, 'Failed to open %s/does_not_exist' %
+                     self.master.config.test_dir)
 
-    @pytest.mark.xfail(reason='freeipa ticket 5378')
     @replica_install_teardown
     def test_incorect_http_pin(self):
         "IPA replica install with incorrect HTTP PKCS#12 password"
@@ -847,9 +839,10 @@ class TestReplicaInstall(CALessBase):
 
         result = self.prepare_replica(http_pin='bad<pin>')
         assert result.returncode > 0
-        assert_error(result, 'incorrect password for pkcs#12 file replica.p12')
+        assert_error(result, 'incorrect password for pkcs#12 file %s' %
+                     os.path.join(self.replicas[0].config.test_dir,
+                                  'replica.p12'))
 
-    @pytest.mark.xfail(reason='freeipa ticket 5378')
     @replica_install_teardown
     def test_incorect_ds_pin(self):
         "IPA replica install with incorrect DS PKCS#12 password"
@@ -857,7 +850,9 @@ class TestReplicaInstall(CALessBase):
         self.create_pkcs12('ca1/replica', filename='replica.p12')
 
         result = self.prepare_replica(dirsrv_pin='bad<pin>')
-        assert_error(result, 'incorrect password for pkcs#12 file replica.p12')
+        assert_error(result, 'incorrect password for pkcs#12 file %s' %
+                     os.path.join(self.replicas[0].config.test_dir,
+                                  'replica.p12'))
 
     @replica_install_teardown
     def test_http_unknown_ca(self):
@@ -895,8 +890,9 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: '
-                     'invalid for server %s' % self.replicas[0].hostname)
+                     'The server certificate in %s/http.p12 is not valid: '
+                     'invalid for server %s' %
+                     (self.master.config.test_dir, self.replicas[0].hostname))
 
     @replica_install_teardown
     def test_invalid_ds_cn(self):
@@ -908,8 +904,9 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in dirsrv.p12 is not valid: '
-                     'invalid for server %s' % self.replicas[0].hostname)
+                     'The server certificate in %s/dirsrv.p12 is not valid: '
+                     'invalid for server %s' %
+                     (self.master.config.test_dir, self.replicas[0].hostname))
 
     @replica_install_teardown
     def test_expired_http(self):
@@ -921,8 +918,9 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: {err}'
-                     .format(err=CERT_EXPIRED_MSG))
+                     'The server certificate in {dir}/http.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=CERT_EXPIRED_MSG))
 
     @replica_install_teardown
     def test_expired_ds(self):
@@ -934,8 +932,9 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: {err}'
-                     .format(err=CERT_EXPIRED_MSG))
+                     'The server certificate in {dir}/http.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=CERT_EXPIRED_MSG))
 
     @replica_install_teardown
     def test_http_bad_usage(self):
@@ -947,8 +946,9 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in http.p12 is not valid: {err}'
-                     .format(err=BAD_USAGE_MSG))
+                     'The server certificate in {dir}/http.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=BAD_USAGE_MSG))
 
     @replica_install_teardown
     def test_ds_bad_usage(self):
@@ -960,42 +960,9 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert_error(result,
-                     'The server certificate in dirsrv.p12 is not valid: {err}'
-                     .format(err=BAD_USAGE_MSG))
-
-    @replica_install_teardown
-    def test_revoked_http(self):
-        "IPA replica install with revoked HTTP certificate"
-
-        self.create_pkcs12('ca1/replica-revoked', filename='http.p12')
-        self.create_pkcs12('ca1/replica', filename='dirsrv.p12')
-
-        result = self.prepare_replica(http_pkcs12='http.p12',
-                                      dirsrv_pkcs12='dirsrv.p12')
-
-        if result.returncode == 0:
-            raise unittest.SkipTest(
-                "Known CA-less installation defect, see "
-                "https://fedorahosted.org/freeipa/ticket/4270")
-
-        assert result.returncode > 0
-
-    @replica_install_teardown
-    def test_revoked_ds(self):
-        "IPA replica install with revoked DS certificate"
-
-        self.create_pkcs12('ca1/replica', filename='http.p12')
-        self.create_pkcs12('ca1/replica-revoked', filename='dirsrv.p12')
-
-        result = self.prepare_replica(http_pkcs12='http.p12',
-                                      dirsrv_pkcs12='dirsrv.p12')
-
-        if result.returncode == 0:
-            raise unittest.SkipTest(
-                "Known CA-less installation defect, see "
-                "https://fedorahosted.org/freeipa/ticket/4270")
-
-        assert result.returncode > 0
+                     'The server certificate in {dir}/dirsrv.p12 is not '
+                     'valid: {err}'.format(dir=self.master.config.test_dir,
+                                           err=BAD_USAGE_MSG))
 
     @replica_install_teardown
     def test_http_intermediate_ca(self):
@@ -1032,8 +999,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='server.p12',
                                       dirsrv_pkcs12='server.p12')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_wildcard_http(self):
@@ -1045,8 +1011,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_wildcard_ds(self):
@@ -1058,8 +1023,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_http_san(self):
@@ -1071,8 +1035,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_ds_san(self):
@@ -1084,8 +1047,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pkcs12='http.p12',
                                       dirsrv_pkcs12='dirsrv.p12')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_interactive_missing_http_pkcs_password(self):
@@ -1099,8 +1061,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(http_pin=None, unattended=False,
                                       stdin_text=stdin_text)
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_interactive_missing_ds_pkcs_password(self):
@@ -1114,8 +1075,7 @@ class TestReplicaInstall(CALessBase):
         result = self.prepare_replica(dirsrv_pin=None, unattended=False,
                                       stdin_text=stdin_text)
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_no_http_password(self):
@@ -1128,8 +1088,7 @@ class TestReplicaInstall(CALessBase):
                                       dirsrv_pkcs12='dirsrv.p12',
                                       http_pin='')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
 
     @replica_install_teardown
     def test_no_ds_password(self):
@@ -1142,8 +1101,40 @@ class TestReplicaInstall(CALessBase):
                                       dirsrv_pkcs12='dirsrv.p12',
                                       dirsrv_pin='')
         assert result.returncode == 0
-        if self.domain_level > DOMAIN_LEVEL_0:
-            self.verify_installation()
+        self.verify_installation()
+
+    @replica_install_teardown
+    def test_certs_with_no_password(self):
+        # related to https://pagure.io/freeipa/issue/7274
+
+        self.create_pkcs12('ca1/replica', filename='http.p12',
+                           password='')
+        self.create_pkcs12('ca1/replica', filename='dirsrv.p12',
+                           password='')
+        self.prepare_cacert('ca1')
+
+        self.prepare_replica(http_pkcs12='http.p12',
+                             dirsrv_pkcs12='dirsrv.p12',
+                             http_pin='', dirsrv_pin='')
+        self.verify_installation()
+
+    @replica_install_teardown
+    def test_certs_with_no_password_interactive(self):
+        # related to https://pagure.io/freeipa/issue/7274
+
+        self.create_pkcs12('ca1/replica', filename='http.p12',
+                           password='')
+        self.create_pkcs12('ca1/replica', filename='dirsrv.p12',
+                           password='')
+        self.prepare_cacert('ca1')
+        stdin_text = '\n\nyes'
+
+        result = self.prepare_replica(http_pkcs12='http.p12',
+                                      dirsrv_pkcs12='dirsrv.p12',
+                                      http_pin=None, dirsrv_pin=None,
+                                      unattended=False, stdin_text=stdin_text)
+        assert result.returncode == 0
+        self.verify_installation()
 
 
 class TestClientInstall(CALessBase):
@@ -1304,7 +1295,6 @@ class TestCertInstall(CALessBase):
                                   cert_exists=False)
         assert_error(result, 'Failed to open does_not_exist')
 
-    @pytest.mark.xfail(reason='freeipa ticket 5378')
     def test_incorect_http_pin(self):
         "Install new HTTP certificate with incorrect PKCS#12 password"
 
@@ -1312,7 +1302,6 @@ class TestCertInstall(CALessBase):
         assert_error(result,
                      'incorrect password for pkcs#12 file server.p12')
 
-    @pytest.mark.xfail(reason='freeipa ticket 5378')
     def test_incorect_dirsrv_pin(self):
         "Install new DS certificate with incorrect PKCS#12 password"
 
@@ -1368,43 +1357,24 @@ class TestCertInstall(CALessBase):
                      'The server certificate in server.p12 is not valid: {err}'
                      .format(err=BAD_USAGE_MSG))
 
-    def test_revoked_http(self):
-        "Install new revoked HTTP certificate"
-
-        result = self.certinstall('w', 'ca1/server-revoked')
-
-        if result.returncode == 0:
-            raise unittest.SkipTest(
-                "Known CA-less installation defect, see "
-                "https://fedorahosted.org/freeipa/ticket/4270")
-
-        assert result.returncode > 0
-
-    def test_revoked_ds(self):
-        "Install new revoked DS certificate"
-
-        result = self.certinstall('d', 'ca1/server-revoked')
-
-        if result.returncode == 0:
-            raise unittest.SkipTest(
-                "Known CA-less installation defect, see "
-                "https://fedorahosted.org/freeipa/ticket/4270")
-
-        assert result.returncode > 0
-
-    @pytest.mark.xfail(reason='freeipa ticket 6959')
+    @pytest.mark.xfail(reason='freeipa ticket 7759', strict=True)
     def test_http_intermediate_ca(self):
         "Install new HTTP certificate issued by intermediate CA"
 
         result = self.certinstall('w', 'ca1/subca/server')
-        assert result.returncode == 0, result.stderr_text
+        # As the intermediate CA is not trusted, command must fail
+        assert_error(result,
+                     "Peer's certificate issuer is not trusted")
 
-    @pytest.mark.xfail(reason='freeipa ticket 6959')
     def test_ds_intermediate_ca(self):
         "Install new DS certificate issued by intermediate CA"
 
         result = self.certinstall('d', 'ca1/subca/server')
-        assert result.returncode == 0, result.stderr_text
+        # As the intermediate CA is not trusted, command must fail
+        assert_error(result,
+                     "Peer's certificate issuer is not trusted "
+                     "(certutil: certificate is invalid: Peer's Certificate "
+                     "issuer is not recognized.")
 
     def test_self_signed(self):
         "Install new self-signed certificate"

@@ -9,7 +9,6 @@ dist_man1_MANS = 			\
 	ipa-replica-install.1		\
 	ipa-replica-manage.1		\
 	ipa-csreplica-manage.1		\
-	ipa-replica-prepare.1		\
 	ipa-server-certinstall.1	\
 	ipa-server-install.1		\
 	ipa-server-upgrade.1		\
@@ -28,6 +27,7 @@ dist_man1_MANS = 			\
 	ipa-cacert-manage.1		\
 	ipa-winsync-migrate.1		\
 	ipa-pkinit-manage.1		\
+	ipa-crlgen-manage.1		\
         $(NULL)
 
 dist_man8_MANS =			\

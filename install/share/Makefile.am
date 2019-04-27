@@ -39,6 +39,7 @@ dist_app_DATA =				\
 	replica-acis.ldif		\
 	replica-prevent-time-skew.ldif  \
 	ds-nfiles.ldif			\
+	ds-ipa-env.conf.template	\
 	dns.ldif			\
 	dnssec.ldif			\
 	domainlevel.ldif			\
@@ -65,7 +66,6 @@ dist_app_DATA =				\
 	opendnssec_conf.template	\
 	opendnssec_kasp.template	\
 	unique-attributes.ldif		\
-	ldapi.ldif			\
 	wsgi.py				\
 	repoint-managed-entries.ldif	\
 	managed-entries.ldif		\
@@ -94,6 +94,10 @@ dist_app_DATA =				\
 	ipa-kdc-proxy.conf.template	\
 	ipa-pki-proxy.conf.template	\
 	ipa-rewrite.conf.template	\
+	min-ssf.ldif			\
+	ipaca_default.ini		\
+	ipaca_customize.ini		\
+	ipaca_softhsm2.ini		\
 	$(NULL)
 
 kdcproxyconfdir = $(IPA_SYSCONF_DIR)/kdcproxy

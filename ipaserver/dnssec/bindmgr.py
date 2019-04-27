@@ -2,6 +2,8 @@
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 from datetime import datetime
 import logging
 
@@ -29,7 +31,8 @@ time_bindfmt = '%Y%m%d%H%M%S'
 FILE_PERM = (stat.S_IRUSR | stat.S_IRGRP | stat.S_IWGRP | stat.S_IWUSR)
 DIR_PERM = (stat.S_IRWXU | stat.S_IRWXG)
 
-class BINDMgr(object):
+
+class BINDMgr:
     """BIND key manager. It does LDAP->BIND key files synchronization.
 
     One LDAP object with idnsSecKey object class will produce
@@ -88,7 +91,7 @@ class BINDMgr(object):
 
         Change is only recorded to memory.
         self.sync() has to be called to synchronize change to BIND."""
-        assert op == 'add' or op == 'del' or op == 'mod'
+        assert op in ('add', 'del', 'mod')
         zone = self.dn2zone_name(attrs['dn'])
         self.modified_zones.add(zone)
         zone_keys = self.ldap_keys.setdefault(zone, {})

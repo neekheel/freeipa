@@ -6,6 +6,8 @@
 Tests for the serverroles backend
 """
 
+from __future__ import absolute_import
+
 from collections import namedtuple
 
 import ldap
@@ -14,6 +16,7 @@ import pytest
 from ipaplatform.paths import paths
 from ipalib import api, create_api, errors
 from ipapython.dn import DN
+from ipaserver.masters import ENABLED_SERVICE
 
 pytestmark = pytest.mark.needs_ipaapi
 
@@ -23,7 +26,7 @@ def _make_service_entry(ldap_backend, dn, enabled=True, other_config=None):
         'objectClass': ['top', 'nsContainer', 'ipaConfigObject'],
     }
     if enabled:
-        mods.update({'ipaConfigString': ['enabledService']})
+        mods.update({'ipaConfigString': [ENABLED_SERVICE]})
 
     if other_config is not None:
         mods.setdefault('ipaConfigString', [])
@@ -216,7 +219,7 @@ master_data = {
 }
 
 
-class MockMasterTopology(object):
+class MockMasterTopology:
     """
     object that will set up and tear down entries in LDAP backend to mimic
     a presence of real IPA masters with services running on them.
@@ -585,7 +588,7 @@ def dns_server(request):
     return request.param
 
 
-class TestServerRoleStatusRetrieval(object):
+class TestServerRoleStatusRetrieval:
     def retrieve_role(self, master, role, mock_api, mock_masters):
         fqdn = mock_masters.get_fqdn(master)
         return mock_api.Backend.serverroles.server_role_retrieve(
@@ -681,7 +684,7 @@ class TestServerRoleStatusRetrieval(object):
                                    'ca-dns-dnssec-keymaster-pkinit-server'))
 
 
-class TestServerAttributes(object):
+class TestServerAttributes:
     def config_retrieve(self, assoc_role_name, mock_api):
         return mock_api.Backend.serverroles.config_retrieve(
             assoc_role_name)

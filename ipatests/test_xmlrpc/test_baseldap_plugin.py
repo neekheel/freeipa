@@ -89,7 +89,7 @@ def test_callback_registration():
         messages.append(('Base registered callback', param))
     callbacktest_base.register_callback('test', registered_callback)
 
-    class SomeClass(object):
+    class SomeClass:
         def registered_callback(self, command, param):
             messages.append(('Registered callback from another class', param))
     callbacktest_base.register_callback('test', SomeClass().registered_callback)
@@ -179,21 +179,23 @@ def test_exc_callback_registration():
 
 @pytest.mark.tier0
 def test_entry_to_dict():
-    class FakeAttributeType(object):
+    class FakeAttributeType:
         def __init__(self, name, syntax):
             self.names = (name,)
             self.syntax = syntax
 
-    class FakeSchema(object):
+    class FakeSchema:
         def get_obj(self, type, name):
             if type != ldap.schema.AttributeType:
-                return
+                return None
             if name == 'binaryattr':
                 return FakeAttributeType(name, '1.3.6.1.4.1.1466.115.121.1.40')
             elif name == 'textattr':
                 return FakeAttributeType(name, '1.3.6.1.4.1.1466.115.121.1.15')
             elif name == 'dnattr':
                 return FakeAttributeType(name, '1.3.6.1.4.1.1466.115.121.1.12')
+            else:
+                return None
 
     class FakeLDAPClient(ipaldap.LDAPClient):
         def __init__(self):

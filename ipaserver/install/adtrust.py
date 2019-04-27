@@ -6,14 +6,14 @@
 AD trust installer module
 """
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import os
 
 import six
 
-from ipalib.constants import DOMAIN_LEVEL_0
+from ipalib.constants import MIN_DOMAIN_LEVEL
 from ipalib import errors
 from ipalib.install.service import ServiceAdminInstallInterface
 from ipalib.install.service import replica_install_only
@@ -95,7 +95,6 @@ def set_and_check_netbios_name(netbios_name, unattended, api):
     cur_netbios_name = None
     gen_netbios_name = None
     reset_netbios_name = False
-    entry = None
 
     if api.Backend.ldap2.isconnected():
         cur_netbios_name = retrieve_netbios_name(api)
@@ -133,7 +132,7 @@ def set_and_check_netbios_name(netbios_name, unattended, api):
             gen_netbios_name = adtrustinstance.make_netbios_name(
                 api.env.domain)
 
-        if entry is not None:
+        if gen_netbios_name is not None:
             # Fix existing trust configuration
             print("Trust is configured but no NetBIOS domain name found, "
                   "setting it now.")
@@ -258,11 +257,11 @@ def retrieve_potential_adtrust_agents(api):
         # because only these masters will have SSSD recent enough
         # to support AD trust agents
         dl_enabled_masters = api.Command.server_find(
-            ipamindomainlevel=DOMAIN_LEVEL_0, all=True)['result']
+            ipamindomainlevel=MIN_DOMAIN_LEVEL, all=True)['result']
     except (errors.DatabaseError, errors.NetworkError) as e:
         logger.error(
             "Could not retrieve a list of existing IPA masters: %s", e)
-        return
+        return None
 
     try:
         # search for existing AD trust agents
@@ -270,7 +269,7 @@ def retrieve_potential_adtrust_agents(api):
             servrole=u'AD trust agent', all=True)['result']
     except (errors.DatabaseError, errors.NetworkError) as e:
         logger.error("Could not retrieve a list of adtrust agents: %s", e)
-        return
+        return None
 
     dl_enabled_master_cns = {m['cn'][0] for m in dl_enabled_masters}
     adtrust_agents_cns = {m['cn'][0] for m in adtrust_agents}

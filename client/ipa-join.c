@@ -39,12 +39,11 @@
 #include "xmlrpc-c/client.h"
 
 #include "ipa-client-common.h"
+#include "ipa_ldap.h"
 
 #define NAME "ipa-join"
 
 #define JOIN_OID "2.16.840.1.113730.3.8.10.3"
-
-#define CAFILE "/etc/ipa/ca.crt"
 
 #define IPA_CONFIG "/etc/ipa/default.conf"
 
@@ -198,57 +197,36 @@ callRPC(char * user_agent,
 
 /* The caller is responsible for unbinding the connection if ld is not NULL */
 static LDAP *
-connect_ldap(const char *hostname, const char *binddn, const char *bindpw) {
+connect_ldap(const char *hostname, const char *binddn, const char *bindpw,
+             int *ret) {
     LDAP *ld = NULL;
-    int ssl = LDAP_OPT_X_TLS_HARD;
-    int version = LDAP_VERSION3;
-    int ret;
-    int ldapdebug = 0;
-    char *uri;
+    int ldapdebug = 2;
+    char *uri = NULL;
     struct berval bindpw_bv;
 
-    if (debug) {
-        ldapdebug = 2;
-        ret = ldap_set_option(NULL, LDAP_OPT_DEBUG_LEVEL, &ldapdebug);
-        if (ret != LDAP_OPT_SUCCESS) {
-            goto fail;
-        }
+    *ret = ldap_set_option(NULL, LDAP_OPT_DEBUG_LEVEL, &ldapdebug);
+    if (*ret != LDAP_OPT_SUCCESS) {
+        goto fail;
     }
 
-    if (ldap_set_option(NULL, LDAP_OPT_X_TLS_CACERTFILE, CAFILE) != LDAP_OPT_SUCCESS)
-        goto fail;
-
-    ret = asprintf(&uri, "ldaps://%s:636", hostname);
-    if (ret == -1) {
+    *ret = asprintf(&uri, "ldaps://%s:636", hostname);
+    if (*ret == -1) {
         fprintf(stderr, _("Out of memory!"));
+        *ret = LDAP_NO_MEMORY;
         goto fail;
     }
 
-    ret = ldap_initialize(&ld, uri);
-    free(uri);
-    if(ret != LDAP_SUCCESS) {
-        fprintf(stderr, _("Unable to initialize connection to ldap server: %s"),
-                        ldap_err2string(ret));
+    *ret = ipa_ldap_init(&ld, uri);
+    if (*ret != LDAP_SUCCESS) {
         goto fail;
     }
-
-    if (ldap_set_option(ld, LDAP_OPT_X_TLS, &ssl) != LDAP_OPT_SUCCESS) {
+    *ret = ipa_tls_ssl_init(ld, uri, DEFAULT_CA_CERT_FILE);
+    if (*ret != LDAP_SUCCESS) {
         fprintf(stderr, _("Unable to enable SSL in LDAP\n"));
         goto fail;
     }
-
-    /* Don't do DNS canonicalization */
-    ret = ldap_set_option(ld, LDAP_OPT_X_SASL_NOCANON, LDAP_OPT_ON);
-    if (ret != LDAP_SUCCESS) {
-        fprintf(stderr, _("Unable to set LDAP_OPT_X_SASL_NOCANON\n"));
-        goto fail;
-    }
-
-    ret = ldap_set_option(ld, LDAP_OPT_PROTOCOL_VERSION, &version);
-    if (ret != LDAP_SUCCESS) {
-        fprintf(stderr, _("Unable to set LDAP version\n"));
-        goto fail;
-    }
+    free(uri);
+    uri = NULL;
 
     if (bindpw) {
         bindpw_bv.bv_val = discard_const(bindpw);
@@ -258,15 +236,11 @@ connect_ldap(const char *hostname, const char *binddn, const char *bindpw) {
         bindpw_bv.bv_len = 0;
     }
 
-    ret = ldap_sasl_bind_s(ld, binddn, LDAP_SASL_SIMPLE, &bindpw_bv,
-                           NULL, NULL, NULL);
+    *ret = ldap_sasl_bind_s(ld, binddn, LDAP_SASL_SIMPLE, &bindpw_bv,
+                            NULL, NULL, NULL);
 
-    if (ret != LDAP_SUCCESS) {
-        int err;
-
-        ldap_get_option(ld, LDAP_OPT_RESULT_CODE, &err);
-        if (debug)
-            fprintf(stderr, _("Bind failed: %s\n"), ldap_err2string(err));
+    if (*ret != LDAP_SUCCESS) {
+        fprintf(stderr, _("Bind failed: %s\n"), ldap_err2string(*ret));
         goto fail;
     }
 
@@ -275,6 +249,9 @@ connect_ldap(const char *hostname, const char *binddn, const char *bindpw) {
 fail:
     if (ld != NULL) {
         ldap_unbind_ext(ld, NULL, NULL);
+    }
+    if (uri != NULL) {
+        free(uri);
     }
     return NULL;
 }
@@ -326,7 +303,7 @@ get_root_dn(const char *ipaserver, char **ldap_base)
     struct berval **defvals;
     int ret, rval = 0;
 
-    ld = connect_ldap(ipaserver, NULL, NULL);
+    ld = connect_ldap(ipaserver, NULL, NULL, &ret);
     if (!ld) {
         rval = 14;
         goto done;
@@ -388,62 +365,6 @@ done:
     return rval;
 }
 
-/*
- * Get the certificate subject base from the IPA configuration.
- *
- * Not considered a show-stopper if this fails for some reason.
- *
- * The caller is responsible for binding/unbinding to LDAP.
- */
-static int
-get_subject(LDAP *ld, char *ldap_base, const char **subject, int quiet)
-{
-    char *attrs[] = {"ipaCertificateSubjectBase", NULL};
-    char *base = NULL;
-    LDAPMessage *entry, *res = NULL;
-    struct berval **ncvals;
-    int ret, rval = 0;
-
-    ret = asprintf(&base, "cn=ipaconfig,cn=etc,%s", ldap_base);
-    if (ret == -1)
-    {
-        if (!quiet)
-            fprintf(stderr, _("Out of memory!\n"));
-        rval = 3;
-        goto done;
-    }
-
-    ret = ldap_search_ext_s(ld, base, LDAP_SCOPE_BASE,
-                            "objectclass=*", attrs, 0,
-                            NULL, NULL, NULL, 0, &res);
-
-    if (ret != LDAP_SUCCESS) {
-        fprintf(stderr,
-                _("Search for ipaCertificateSubjectBase failed with error %d"),
-                ret);
-        rval = 14;
-        goto done;
-    }
-
-    entry = ldap_first_entry(ld, res);
-    ncvals = ldap_get_values_len(ld, entry, attrs[0]);
-    if (!ncvals) {
-        fprintf(stderr, _("No values for %s"), attrs[0]);
-        rval = 14;
-        goto done;
-    }
-
-    *subject = strdup(ncvals[0]->bv_val);
-
-    ldap_value_free_len(ncvals);
-
-done:
-    free(base);
-    if (res) ldap_msgfree(res);
-
-    return rval;
-}
-
 /* Join a host to the current IPA realm.
  *
  * There are several scenarios for this:
@@ -463,7 +384,7 @@ done:
  * the state of the entry.
  */
 static int
-join_ldap(const char *ipaserver, char *hostname, char ** binddn, const char *bindpw, const char *basedn, const char **princ, const char **subject, int quiet)
+join_ldap(const char *ipaserver, char *hostname, char ** binddn, const char *bindpw, const char *basedn, const char **princ, int quiet)
 {
     LDAP *ld;
     int rval = 0;
@@ -475,7 +396,6 @@ join_ldap(const char *ipaserver, char *hostname, char ** binddn, const char *bin
 
     *binddn = NULL;
     *princ = NULL;
-    *subject = NULL;
 
     if (NULL != basedn) {
         ldap_base = strdup(basedn);
@@ -503,20 +423,24 @@ join_ldap(const char *ipaserver, char *hostname, char ** binddn, const char *bin
         rval = 3;
         goto done;
     }
-    ld = connect_ldap(ipaserver, *binddn, bindpw);
+    ld = connect_ldap(ipaserver, *binddn, bindpw, &ret);
     if (!ld) {
-        if (!quiet)
-            fprintf(stderr, _("Incorrect password.\n"));
-        rval = 15;
-        goto done;
-    }
+        if (quiet)
+            goto done;
 
-    if (get_subject(ld, ldap_base, subject, quiet) != 0) {
-        if (!quiet)
-            fprintf(stderr,
-                    _("Unable to determine certificate subject of %s\n"),
-                    ipaserver);
-        /* Not a critical failure */
+        switch(ret) {
+            case LDAP_NO_MEMORY:
+                rval = 3;
+                break;
+            case LDAP_INVALID_CREDENTIALS: /* incorrect password */
+            case LDAP_INAPPROPRIATE_AUTH: /* no password set */
+                rval = 15;
+                break;
+            default: /* LDAP connection error catch-all */
+                rval = 14;
+                break;
+        }
+        goto done;
     }
 
     valrequest.bv_val = (char *)hostname;
@@ -555,7 +479,7 @@ done:
 }
 
 static int
-join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **princ, const char **subject, int force, int quiet) {
+join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **princ, int force, int quiet) {
     xmlrpc_env env;
     xmlrpc_value * argArrayP = NULL;
     xmlrpc_value * paramArrayP = NULL;
@@ -567,7 +491,6 @@ join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **pri
     struct utsname uinfo;
     xmlrpc_value *princP = NULL;
     xmlrpc_value *krblastpwdchangeP = NULL;
-    xmlrpc_value *subjectP = NULL;
     xmlrpc_value *hostdnP = NULL;
     const char *krblastpwdchange = NULL;
     char * url = NULL;
@@ -576,7 +499,6 @@ join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **pri
     int ret;
 
     *hostdn = NULL;
-    *subject = NULL;
     *princ = NULL;
 
     /* Start up our XML-RPC client library. */
@@ -673,18 +595,6 @@ join_krb5(const char *ipaserver, char *hostname, char **hostdn, const char **pri
             fprintf(stderr, _("Host is already joined.\n"));
         rval = 13;
         goto cleanup;
-    }
-
-    xmlrpc_struct_find_value(&env, structP, "ipacertificatesubjectbase", &subjectP);
-    if (subjectP) {
-        xmlrpc_value * singleprincP = NULL;
-
-        /* FIXME: all values are returned as lists currently. Once this is
-         * fixed we can read the string directly.
-         */
-        xmlrpc_array_read_item(&env, subjectP, 0, &singleprincP);
-        xmlrpc_read_string(&env, singleprincP, *&subject);
-        xmlrpc_DECREF(subjectP);
     }
 
 cleanup:
@@ -939,7 +849,6 @@ join(const char *server, const char *hostname, const char *bindpw, const char *b
     char *iparealm = NULL;
     char * host = NULL;
     const char * princ = NULL;
-    const char * subject = NULL;
     char * hostdn = NULL;
     struct utsname uinfo;
 
@@ -980,7 +889,7 @@ join(const char *server, const char *hostname, const char *bindpw, const char *b
     }
 
     if (bindpw)
-        rval = join_ldap(ipaserver, host, &hostdn, bindpw, basedn, &princ, &subject, quiet);
+        rval = join_ldap(ipaserver, host, &hostdn, bindpw, basedn, &princ, quiet);
     else {
         krberr = krb5_init_context(&krbctx);
         if (krberr) {
@@ -1004,7 +913,7 @@ join(const char *server, const char *hostname, const char *bindpw, const char *b
             rval = 6;
             goto cleanup;
         }
-        rval = join_krb5(ipaserver, host, &hostdn, &princ, &subject, force,
+        rval = join_krb5(ipaserver, host, &hostdn, &princ, force,
                          quiet);
     }
 
@@ -1066,11 +975,7 @@ join(const char *server, const char *hostname, const char *bindpw, const char *b
     }
 
 cleanup:
-    if (NULL != subject && !quiet && rval == 0)
-        fprintf(stderr, _("Certificate subject base is: %s\n"), subject);
-
     free((char *)princ);
-    free((char *)subject);
     free(host);
 
     if (bindpw)

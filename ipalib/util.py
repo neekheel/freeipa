@@ -37,6 +37,7 @@ import sys
 import ssl
 import termios
 import fcntl
+import shutil
 import struct
 import subprocess
 
@@ -86,7 +87,7 @@ def json_serialize(obj):
         return [json_serialize(o) for o in obj]
     if isinstance(obj, dict):
         return {k: json_serialize(v) for (k, v) in obj.items()}
-    if isinstance(obj, (bool, float, unicode, type(None), six.integer_types)):
+    if isinstance(obj, (int, bool, float, unicode, type(None))):
         return obj
     if isinstance(obj, str):
         return obj.decode('utf-8')
@@ -158,8 +159,8 @@ def isvalid_base64(data):
 
     data = ''.join(data.split())
 
-    if len(data) % 4 > 0 or \
-        re.match('^[a-zA-Z0-9\+\/]+\={0,2}$', data) is None:
+    if (len(data) % 4 > 0 or
+            re.match(r'^[a-zA-Z0-9\+\/]+\={0,2}$', data) is None):
         return False
     else:
         return True
@@ -214,7 +215,7 @@ def check_writable_file(filename):
         raise errors.FileError(reason=str(e))
 
 def normalize_zonemgr(zonemgr):
-    if not zonemgr or not isinstance(zonemgr, six.string_types):
+    if not zonemgr or not isinstance(zonemgr, str):
         return zonemgr
     if '@' in zonemgr:
         # local-part needs to be normalized
@@ -763,8 +764,8 @@ def _resolve_record(owner, rtype, nameserver_ip=None, edns0=False,
     :param flag_cd: requires dnssec=True, adds flag CD
     :raise DNSException: if error occurs
     """
-    assert isinstance(nameserver_ip, six.string_types) or nameserver_ip is None
-    assert isinstance(rtype, six.string_types)
+    assert isinstance(nameserver_ip, str) or nameserver_ip is None
+    assert isinstance(rtype, str)
 
     res = dns.resolver.Resolver()
     if nameserver_ip:
@@ -981,21 +982,20 @@ def detect_dns_zone_realm_type(api, domain):
 
     try:
         # The presence of this record is enough, return foreign in such case
-        result = resolver.query(ad_specific_record_name, rdatatype.SRV)
+        resolver.query(ad_specific_record_name, rdatatype.SRV)
+    except DNSException:
+        # If we could not detect type with certainty, return unknown
+        return 'unknown'
+    else:
         return 'foreign'
 
-    except DNSException:
-        pass
-
-    # If we could not detect type with certainity, return unknown
-    return 'unknown'
 
 def has_managed_topology(api):
     domainlevel = api.Command['domainlevel_get']().get('result', DOMAIN_LEVEL_0)
     return domainlevel > DOMAIN_LEVEL_0
 
 
-class classproperty(object):
+class classproperty:
     __slots__ = ('__doc__', 'fget')
 
     def __init__(self, fget=None, doc=None):
@@ -1123,14 +1123,18 @@ def ensure_krbcanonicalname_set(ldap, entry_attrs):
     entry_attrs.update(old_entry)
 
 
-def check_client_configuration():
+def check_client_configuration(env=None):
     """
     Check if IPA client is configured on the system.
+
+    Hardcode return code to avoid recursive imports
     """
-    if (not os.path.isfile(paths.IPA_DEFAULT_CONF) or
+    if ((env is not None and not os.path.isfile(env.conf_default)) or
+       (not os.path.isfile(paths.IPA_DEFAULT_CONF) or
             not os.path.isdir(paths.IPA_CLIENT_SYSRESTORE) or
-            not os.listdir(paths.IPA_CLIENT_SYSRESTORE)):
-        raise ScriptError('IPA client is not configured on this system')
+            not os.listdir(paths.IPA_CLIENT_SYSRESTORE))):
+        raise ScriptError('IPA client is not configured on this system',
+                          2)  # CLIENT_NOT_CONFIGURED
 
 
 def check_principal_realm_in_trust_namespace(api_instance, *keys):
@@ -1201,17 +1205,27 @@ def get_terminal_height(fd=1):
         return os.environ.get("LINES", 25)
 
 
-def open_in_pager(data):
+def get_pager():
+    """ Get path to a pager
+
+    :return: path to the file if it exists otherwise None
+    :rtype: str or None
+    """
+    pager = os.environ.get('PAGER', 'less')
+    return shutil.which(pager)
+
+
+def open_in_pager(data, pager):
     """
     Open text data in pager
 
     Args:
         data (bytes): data to view in pager
+        pager (str): path to the pager
 
     Returns:
         None
     """
-    pager = os.environ.get("PAGER", "less")
     pager_process = subprocess.Popen([pager], stdin=subprocess.PIPE)
 
     try:

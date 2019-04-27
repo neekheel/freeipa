@@ -17,7 +17,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 from contextlib import contextmanager
 import logging
@@ -30,6 +30,7 @@ from ipalib.errors import ValidationError
 from ipaplatform.paths import paths
 from ipapython import admintool
 from ipapython.ipa_log_manager import Filter
+from ipaserver.install import installutils
 
 
 """
@@ -80,7 +81,7 @@ As a result, you can redirect the advice's output directly to a script file.
 DEFAULT_INDENTATION_INCREMENT = 2
 
 
-class _IndentationTracker(object):
+class _IndentationTracker:
     """
     A simple wrapper that tracks the indentation level of the generated bash
     commands
@@ -129,7 +130,7 @@ class _IndentationTracker(object):
         self._recompute_indentation_level()
 
 
-class CompoundStatement(object):
+class CompoundStatement:
     """
     Wrapper around indented blocks of Bash statements.
 
@@ -220,12 +221,13 @@ class ForLoop(CompoundStatement):
         self.advice_output.command('done')
 
 
-class _AdviceOutput(object):
+class _AdviceOutput:
 
     def __init__(self):
         self.content = []
         self.prefix = '# '
         self.options = None
+        self.pkgmgr_detected = False
         self._indentation_tracker = _IndentationTracker(
             spaces_per_indent=DEFAULT_INDENTATION_INCREMENT)
 
@@ -310,6 +312,41 @@ class _AdviceOutput(object):
                 self.command(self._format_error(error_message_line))
 
             self.command('exit 1')
+
+    def detect_pkgmgr(self):
+        self.commands_on_predicate(
+            'which yum >/dev/null',
+            commands_to_run_when_true=['PKGMGR=yum'],
+            commands_to_run_when_false=['PKGMGR=dnf']
+        )
+        self.pkgmgr_detected = True
+
+    def install_packages(self, names, error_message_lines):
+        assert isinstance(names, list)
+        self.detect_pkgmgr()
+        self.command('rpm -qi {} > /dev/null'.format(' '.join(names)))
+        self.commands_on_predicate(
+            '[ "$?" -ne "0" ]',
+            ['$PKGMGR install -y {}'.format(' '.join(names))]
+        )
+        self.exit_on_predicate(
+            '[ "$?" -ne "0" ]',
+            error_message_lines
+        )
+
+    def remove_package(self, name, error_message_lines):
+        # remove only supports one package name
+        assert ' ' not in name
+        self.detect_pkgmgr()
+        self.command('rpm -qi {} > /dev/null'.format(name))
+        self.commands_on_predicate(
+            '[ "$?" -eq "0" ]',
+            ['$PKGMGR remove -y {} || exit 1'.format(name)]
+        )
+        self.exit_on_predicate(
+            '[ "$?" -ne "0" ]',
+            error_message_lines
+        )
 
     @contextmanager
     def unbranched_if(self, predicate):
@@ -418,6 +455,7 @@ class IpaAdvise(admintool.AdminTool):
 
     def validate_options(self):
         super(IpaAdvise, self).validate_options(needs_root=False)
+        installutils.check_server_configuration()
 
         if len(self.args) > 1:
             raise self.option_parser.error("You can only provide one "

@@ -1,13 +1,11 @@
 # Copyright (C) 2015  IPA Project Contributors, see COPYING for license
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import errno
 import os
 
-# pylint: disable=import-error
-from six.moves.configparser import ConfigParser
-# pylint: enable=import-error
+from configparser import ConfigParser
 
 from ipaplatform.paths import paths
 from ipapython.dn import DN

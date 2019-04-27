@@ -66,11 +66,11 @@ class StageUserTracker(KerberosAliasMixin, Tracker):
         """ Check for non-empty unicode string for the required attributes
         in the init method """
 
-        if not (isinstance(givenname, six.string_types) and givenname):
+        if not (isinstance(givenname, str) and givenname):
             raise ValueError(
                 "Invalid first name provided: {!r}".format(givenname)
                 )
-        if not (isinstance(sn, six.string_types) and sn):
+        if not (isinstance(sn, str) and sn):
             raise ValueError("Invalid second name provided: {!r}".format(sn))
 
         super(StageUserTracker, self).__init__(default_version=None)
@@ -160,7 +160,7 @@ class StageUserTracker(KerberosAliasMixin, Tracker):
             elif key == u'ipasshpubkey':
                 self.attrs[u'sshpubkeyfp'] = [sshpubkeyfp]
                 self.attrs[key] = [self.kwargs[key]]
-            elif key == u'random' or key == u'userpassword':
+            elif key in {u'random', u'userpassword'}:
                 self.attrs[u'krbextradata'] = [Fuzzy(type=bytes)]
                 self.attrs[u'krbpasswordexpiration'] = [
                     fuzzy_dergeneralizedtime]

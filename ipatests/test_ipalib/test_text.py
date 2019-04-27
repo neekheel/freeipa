@@ -50,7 +50,7 @@ def test_create_translation():
     assert context.__dict__[key] is t
 
 
-class test_TestLang(object):
+class test_TestLang:
     lang_env_vars = {'LC_ALL', 'LC_MESSAGES', 'LANGUAGE', 'LANG'}
 
     def setup_lang(self):
@@ -148,7 +148,8 @@ class test_TestLang(object):
         result = self.po_file_iterate(self.po_file, get_msgstr, get_msgstr_plural)
         assert result == 0
 
-class test_LazyText(object):
+
+class test_LazyText:
 
     klass = text.LazyText
 
@@ -159,7 +160,7 @@ class test_LazyText(object):
         assert inst.key == ('foo', 'bar')
 
 
-class test_FixMe(object):
+class test_FixMe:
     klass = text.FixMe
 
     def test_init(self):
@@ -178,7 +179,7 @@ class test_FixMe(object):
         assert type(unicode(inst)) is unicode
 
 
-class test_Gettext(object):
+class test_Gettext:
 
     klass = text.Gettext
 
@@ -199,7 +200,13 @@ class test_Gettext(object):
 
     def test_mod(self):
         inst = self.klass('hello %(adj)s nurse', 'foo', 'bar')
-        assert inst % dict(adj='naughty', stuff='junk') == 'hello naughty nurse'
+        assert inst % dict(adj='tall', stuff='junk') == 'hello tall nurse'
+
+    def test_format(self):
+        inst = self.klass('{0} {adj} nurse', 'foo', 'bar')
+        posargs = ('hello', 'bye')
+        knownargs = {'adj': 'caring', 'stuff': 'junk'}
+        assert inst.format(*posargs, **knownargs) == 'hello caring nurse'
 
     def test_eq(self):
         inst1 = self.klass('what up?', 'foo', 'bar')
@@ -207,6 +214,7 @@ class test_Gettext(object):
         inst3 = self.klass('Hello world', 'foo', 'bar')
         inst4 = self.klass('what up?', 'foo', 'baz')
 
+        # pylint: disable=comparison-with-itself
         assert (inst1 == inst1) is True
         assert (inst1 == inst2) is True
         assert (inst1 == inst3) is False
@@ -234,7 +242,7 @@ class test_Gettext(object):
         assert (inst4 != inst1) is True
 
 
-class test_NGettext(object):
+class test_NGettext:
 
     klass = text.NGettext
 
@@ -264,12 +272,28 @@ class test_NGettext(object):
         assert inst % dict(count=1, dish='stew') == '1 goose makes a stew'
         assert inst % dict(count=2, dish='pie') == '2 geese make a pie'
 
+    def test_format(self):
+        singular = '{count} goose makes a {0} {dish}'
+        plural = '{count} geese make a {0} {dish}'
+        inst = self.klass(singular, plural, 'foo', 'bar')
+        posargs = ('tasty', 'disgusting')
+        knownargs0 = {'count': 0, 'dish': 'frown', 'stuff': 'junk'}
+        knownargs1 = {'count': 1, 'dish': 'stew', 'stuff': 'junk'}
+        knownargs2 = {'count': 2, 'dish': 'pie', 'stuff': 'junk'}
+        expected_str0 = '0 geese make a tasty frown'
+        expected_str1 = '1 goose makes a tasty stew'
+        expected_str2 = '2 geese make a tasty pie'
+        assert inst.format(*posargs, **knownargs0) == expected_str0
+        assert inst.format(*posargs, **knownargs1) == expected_str1
+        assert inst.format(*posargs, **knownargs2) == expected_str2
+
     def test_eq(self):
         inst1 = self.klass(singular, plural, 'foo', 'bar')
         inst2 = self.klass(singular, plural, 'foo', 'bar')
         inst3 = self.klass(singular, '%(count)d thingies', 'foo', 'bar')
         inst4 = self.klass(singular, plural, 'foo', 'baz')
 
+        # pylint: disable=comparison-with-itself
         assert (inst1 == inst1) is True
         assert (inst1 == inst2) is True
         assert (inst1 == inst3) is False
@@ -297,7 +321,7 @@ class test_NGettext(object):
         assert (inst4 != inst1) is True
 
 
-class test_GettextFactory(object):
+class test_GettextFactory:
 
     klass = text.GettextFactory
 
@@ -330,7 +354,7 @@ class test_GettextFactory(object):
         assert g.localedir == 'bar'
 
 
-class test_NGettextFactory(object):
+class test_NGettextFactory:
 
     klass = text.NGettextFactory
 
@@ -364,7 +388,7 @@ class test_NGettextFactory(object):
         assert ng.localedir == 'bar'
 
 
-class test_ConcatenatedText(object):
+class test_ConcatenatedText:
 
     klass = text.ConcatenatedLazyText
 
@@ -386,6 +410,12 @@ class test_ConcatenatedText(object):
     def test_mod(self):
         inst = self.klass('[', text.Gettext('%(color)s', 'foo', 'bar'), ']')
         assert inst % dict(color='red', stuff='junk') == '[red]'
+
+    def test_format(self):
+        inst = self.klass('{0}', text.Gettext('{color}', 'foo', 'bar'), ']')
+        posargs = ('[', '(')
+        knownargs = {'color': 'red', 'stuff': 'junk'}
+        assert inst.format(*posargs, **knownargs) == '[red]'
 
     def test_add(self):
         inst = (text.Gettext('pale ', 'foo', 'bar') +

@@ -2103,7 +2103,7 @@ IPA.option_widget_base = function(spec, that) {
         var enabled = that.enabled && option.enabled;
 
         var opt_cont = construct.create('span', {
-            "class": that.intput_type + '-cnt'
+            "class": that.input_type + '-cnt'
         });
 
         option.input_node = construct.create('input', {
@@ -4188,6 +4188,7 @@ IPA.attribute_table_widget = function(spec) {
 
     that.attribute_name = spec.attribute_name || that.name;
     that.adder_dialog_spec = spec.adder_dialog;
+    that.deleter_dialog_spec = spec.deleter_dialog;
     that.css_class = spec.css_class;
 
     that.add_command = spec.add_command;
@@ -4335,9 +4336,17 @@ IPA.attribute_table_widget = function(spec) {
             return null;
         }
 
+        var title;
+        if (that.deleter_dialog_spec) {
+            var pkey = that.facet.get_pkey();
+            title = text.get(that.deleter_dialog_spec.title);
+            title = title.replace('${primary_key}', pkey);
+        }
+
         var dialog = IPA.deleter_dialog({
             entity: that.entity,
-            values: selected_values
+            values: selected_values,
+            title: title
         });
 
         dialog.execute = function() {
@@ -4409,11 +4418,10 @@ IPA.attribute_table_widget = function(spec) {
             $.extend(dialog_spec, that.adder_dialog_spec);
         }
 
-        var label = that.entity.metadata.label_singular;
         var pkey = that.facet.get_pkey();
-        dialog_spec.title = text.get(dialog_spec.title || '@i18n:dialogs.add_title');
-        dialog_spec.title = dialog_spec.title.replace('${entity}', label);
-        dialog_spec.title = dialog_spec.title.replace('${pkey}', pkey);
+        dialog_spec.title = text.get(dialog_spec.title ||
+                                         '@i18n:dialogs.add_title_default');
+        dialog_spec.title = dialog_spec.title.replace('${primary_key}', pkey);
 
 
         var factory = dialog_spec.$factory || IPA.entity_adder_dialog;
@@ -5013,7 +5021,7 @@ IPA.entity_select_widget = function(spec) {
             method: 'find',
             args: [filter],
             options: that.filter_options,
-            suppress_warnings: [13017]
+            suppress_warnings: [rpc.errors.search_result_truncated]
         });
         var no_members = metadata.get('@mc-opt:' + cmd.get_command() + ':no_members');
         if (no_members) {

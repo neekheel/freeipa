@@ -17,9 +17,13 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import, print_function
+
 import logging
+import optparse  # pylint: disable=deprecated-module
 import os
 import shutil
+import sys
 import tempfile
 import time
 import pwd
@@ -51,45 +55,38 @@ ISO8601_DATETIME_FMT = '%Y-%m-%dT%H:%M:%S'
 logger = logging.getLogger(__name__)
 
 """
-A test gpg can be generated like this:
+A test GnuPG key can be generated like this:
 
 # cat >keygen <<EOF
-     %echo Generating a standard key
-     Key-Type: RSA
-     Key-Length: 2048
-     Name-Real: IPA Backup
-     Name-Comment: IPA Backup
-     Name-Email: root@example.com
-     Expire-Date: 0
-     %pubring /root/backup.pub
-     %secring /root/backup.sec
-     %commit
-     %echo done
+%echo Generating a standard key
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: IPA Backup
+Name-Comment: IPA Backup
+Name-Email: root@example.com
+Expire-Date: 0
+Passphrase: SecretPassPhrase42
+%commit
+%echo done
 EOF
-# gpg --batch --gen-key keygen
-# gpg --no-default-keyring --secret-keyring /root/backup.sec \
-      --keyring /root/backup.pub --list-secret-keys
+# export GNUPGHOME=/root/backup
+# mkdir -p $GNUPGHOME
+# gpg2 --batch --gen-key keygen
+# gpg2 --list-secret-keys
 """
 
 
-def encrypt_file(filename, keyring, remove_original=True):
+def encrypt_file(filename, remove_original=True):
     source = filename
     dest = filename + '.gpg'
 
-    args = [paths.GPG,
-            '--batch',
-            '--default-recipient-self',
-            '-o', dest]
-
-    if keyring is not None:
-        args.append('--no-default-keyring')
-        args.append('--keyring')
-        args.append(keyring + '.pub')
-        args.append('--secret-keyring')
-        args.append(keyring + '.sec')
-
-    args.append('-e')
-    args.append(source)
+    args = [
+        paths.GPG2,
+        '--batch',
+        '--default-recipient-self',
+        '--output', dest,
+        '--encrypt', source,
+    ]
 
     result = run(args, raiseonerr=False)
     if result.returncode != 0:
@@ -131,7 +128,6 @@ class Backup(admintool.AdminTool):
         paths.RESOLV_CONF,
         paths.SYSCONFIG_PKI_TOMCAT,
         paths.SYSCONFIG_DIRSRV,
-        paths.SYSCONFIG_NTPD,
         paths.SYSCONFIG_KRB5KDC_DIR,
         paths.SYSCONFIG_IPA_DNSKEYSYNCD,
         paths.SYSCONFIG_IPA_ODS_EXPORTER,
@@ -152,6 +148,7 @@ class Backup(admintool.AdminTool):
         paths.HTTPD_IPA_PKI_PROXY_CONF,
         paths.HTTPD_IPA_REWRITE_CONF,
         paths.HTTPD_SSL_CONF,
+        paths.HTTPD_SSL_SITE_CONF,
         paths.HTTPD_CERT_FILE,
         paths.HTTPD_KEY_FILE,
         paths.HTTPD_IPA_CONF,
@@ -163,7 +160,7 @@ class Backup(admintool.AdminTool):
         paths.IPA_CA_CRT,
         paths.IPA_DEFAULT_CONF,
         paths.DS_KEYTAB,
-        paths.NTP_CONF,
+        paths.CHRONY_CONF,
         paths.SMB_CONF,
         paths.SAMBA_KEYTAB,
         paths.DOGTAG_ADMIN_P12,
@@ -191,7 +188,9 @@ class Backup(admintool.AdminTool):
         paths.IPA_DNSKEYSYNCD_KEYTAB,
         paths.IPA_CUSTODIA_KEYS,
         paths.IPA_CUSTODIA_CONF,
+        paths.GSSPROXY_CONF,
         paths.HOSTS,
+        paths.SYSTEMD_PKI_TOMCAT_IPA_CONF,
     ) + tuple(
         os.path.join(paths.IPA_NSSDB_DIR, file)
         for file in (certdb.NSS_DBM_FILES + certdb.NSS_SQL_FILES)
@@ -231,16 +230,22 @@ class Backup(admintool.AdminTool):
     def add_options(cls, parser):
         super(Backup, cls).add_options(parser, debug_option=True)
 
-        parser.add_option("--gpg-keyring", dest="gpg_keyring",
-            help="The gpg key name to be used (or full path)")
-        parser.add_option("--gpg", dest="gpg", action="store_true",
-          default=False, help="Encrypt the backup")
-        parser.add_option("--data", dest="data_only", action="store_true",
+        parser.add_option(
+            "--gpg-keyring", dest="gpg_keyring",
+            help=optparse.SUPPRESS_HELP)
+        parser.add_option(
+            "--gpg", dest="gpg", action="store_true",
+            default=False, help="Encrypt the backup")
+        parser.add_option(
+            "--data", dest="data_only", action="store_true",
             default=False, help="Backup only the data")
-        parser.add_option("--logs", dest="logs", action="store_true",
+        parser.add_option(
+            "--logs", dest="logs", action="store_true",
             default=False, help="Include log files in backup")
-        parser.add_option("--online", dest="online", action="store_true",
-            default=False, help="Perform the LDAP backups online, for data only.")
+        parser.add_option(
+            "--online", dest="online", action="store_true",
+            default=False,
+            help="Perform the LDAP backups online, for data only.")
 
 
     def setup_logging(self, log_file_mode='a'):
@@ -253,9 +258,11 @@ class Backup(admintool.AdminTool):
         installutils.check_server_configuration()
 
         if options.gpg_keyring is not None:
-            if not os.path.exists(options.gpg_keyring + '.pub'):
-                raise admintool.ScriptError('No such key %s' %
-                    options.gpg_keyring)
+            print(
+                "--gpg-keyring is no longer supported, use GNUPGHOME "
+                "environment variable to use a custom GnuPG2 directory.",
+                file=sys.stderr
+            )
             options.gpg = True
 
         if options.online and not options.data_only:
@@ -264,7 +271,7 @@ class Backup(admintool.AdminTool):
 
         if options.gpg:
             tmpfd = write_tmp_file('encryptme')
-            newfile = encrypt_file(tmpfd.name, options.gpg_keyring, False)
+            newfile = encrypt_file(tmpfd.name, False)
             os.unlink(newfile)
 
         if options.data_only and options.logs:
@@ -290,6 +297,7 @@ class Backup(admintool.AdminTool):
         os.mkdir(self.dir)
         os.chmod(self.dir, 0o750)
         os.chown(self.dir, pent.pw_uid, pent.pw_gid)
+        self.tarfile = None
 
         self.header = os.path.join(self.top_dir, 'header')
 
@@ -313,7 +321,7 @@ class Backup(admintool.AdminTool):
                 logger.info('Stopping IPA services')
                 run([paths.IPACTL, 'stop'])
 
-            instance = installutils.realm_to_serverid(api.env.realm)
+            instance = ipaldap.realm_to_serverid(api.env.realm)
             if os.path.exists(paths.VAR_LIB_SLAPD_INSTANCE_DIR_TEMPLATE %
                               instance):
                 if os.path.exists(paths.SLAPD_INSTANCE_DB_DIR_TEMPLATE %
@@ -326,7 +334,6 @@ class Backup(admintool.AdminTool):
                 auth_backup_path = os.path.join(paths.VAR_LIB_IPA, 'auth_backup')
                 tasks.backup_auth_configuration(auth_backup_path)
                 self.file_backup(options)
-            self.finalize_backup(options.data_only, options.gpg, options.gpg_keyring)
 
             if options.data_only:
                 if not options.online:
@@ -335,6 +342,14 @@ class Backup(admintool.AdminTool):
             else:
                 logger.info('Starting IPA service')
                 run([paths.IPACTL, 'start'])
+
+            # Compress after services are restarted to minimize
+            # the unavailability window
+            if not options.data_only:
+                self.compress_file_backup()
+
+            self.finalize_backup(options.data_only, options.gpg,
+                                 options.gpg_keyring)
 
         finally:
             try:
@@ -350,7 +365,7 @@ class Backup(admintool.AdminTool):
 
         NOTE: this adds some things that may not get backed up.
         '''
-        serverid = installutils.realm_to_serverid(api.env.realm)
+        serverid = ipaldap.realm_to_serverid(api.env.realm)
 
         for dir in [paths.ETC_DIRSRV_SLAPD_INSTANCE_TEMPLATE % serverid,
                     paths.VAR_LIB_DIRSRV_INSTANCE_SCRIPTS_TEMPLATE % serverid,
@@ -361,9 +376,14 @@ class Backup(admintool.AdminTool):
         for file in (
             paths.SYSCONFIG_DIRSRV_INSTANCE % serverid,
             paths.ETC_TMPFILESD_DIRSRV % serverid,
+            paths.SLAPD_INSTANCE_SYSTEMD_IPA_ENV_TEMPLATE % serverid,
         ):
             if os.path.exists(file):
                 self.files.append(file)
+
+        self.files.append(
+            paths.HTTPD_PASSWD_FILE_FMT.format(host=api.env.host)
+        )
 
         self.logs.append(paths.VAR_LOG_DIRSRV_INSTANCE_TEMPLATE % serverid)
 
@@ -375,14 +395,13 @@ class Backup(admintool.AdminTool):
         if self._conn is not None:
             return self._conn
 
-        ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=api.env.realm)
-        self._conn = ipaldap.LDAPClient(ldap_uri)
+        self._conn = ipaldap.LDAPClient.from_realm(api.env.realm)
 
         try:
             self._conn.external_bind()
         except Exception as e:
             logger.error("Unable to bind to LDAP server %s: %s",
-                         self._conn.host, e)
+                         self._conn.ldap_uri, e)
 
         return self._conn
 
@@ -489,7 +508,7 @@ class Backup(admintool.AdminTool):
         def verify_directories(dirs):
             return [s for s in dirs if os.path.exists(s)]
 
-        tarfile = os.path.join(self.dir, 'files.tar')
+        self.tarfile = os.path.join(self.dir, 'files.tar')
 
         logger.info("Backing up files")
         args = ['tar',
@@ -497,7 +516,7 @@ class Backup(admintool.AdminTool):
                 '--xattrs',
                 '--selinux',
                 '-cf',
-                tarfile
+                self.tarfile
                ]
 
         args.extend(verify_directories(self.dirs))
@@ -523,7 +542,7 @@ class Backup(admintool.AdminTool):
                     '--selinux',
                     '--no-recursion',
                     '-rf',  # -r appends to an existing archive
-                    tarfile,
+                    self.tarfile,
                    ]
             args.extend(missing_directories)
 
@@ -534,17 +553,20 @@ class Backup(admintool.AdminTool):
                     'when adding directory structure: %s' %
                     (result.returncode, result.error_log))
 
+    def compress_file_backup(self):
+
         # Compress the archive. This is done separately, since 'tar' cannot
         # append to a compressed archive.
-        result = run([paths.GZIP, tarfile], raiseonerr=False)
-        if result.returncode != 0:
-            raise admintool.ScriptError(
-                'gzip returned non-zero code %d '
-                'when compressing the backup: %s' %
-                (result.returncode, result.error_log))
+        if self.tarfile:
+            result = run([paths.GZIP, self.tarfile], raiseonerr=False)
+            if result.returncode != 0:
+                raise admintool.ScriptError(
+                    'gzip returned non-zero code %d '
+                    'when compressing the backup: %s' %
+                    (result.returncode, result.error_log))
 
-        # Rename the archive back to files.tar to preserve compatibility
-        os.rename(os.path.join(self.dir, 'files.tar.gz'), tarfile)
+            # Rename the archive back to files.tar to preserve compatibility
+            os.rename(os.path.join(self.dir, 'files.tar.gz'), self.tarfile)
 
 
     def create_header(self, data_only):
@@ -563,7 +585,8 @@ class Backup(admintool.AdminTool):
         config.set('ipa', 'ipa_version', str(version.VERSION))
         config.set('ipa', 'version', '1')
 
-        dn = DN(('cn', api.env.host), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+        dn = DN(('cn', api.env.host), api.env.container_masters,
+                api.env.basedn)
         services_cns = []
         try:
             conn = self.get_connection()
@@ -573,7 +596,7 @@ class Backup(admintool.AdminTool):
               "Unable to obtain list of master services, continuing anyway")
         except Exception as e:
             logger.error("Failed to read services from '%s': %s",
-                         conn.host, e)
+                         conn.ldap_uri, e)
         else:
             services_cns = [s.single_value['cn'] for s in services]
 
@@ -621,7 +644,7 @@ class Backup(admintool.AdminTool):
 
         if encrypt:
             logger.info('Encrypting %s', filename)
-            filename = encrypt_file(filename, keyring)
+            filename = encrypt_file(filename)
 
         shutil.move(self.header, backup_dir)
 

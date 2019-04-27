@@ -37,13 +37,14 @@ from ipaserver.install import replication
 from ipaserver.install import service
 from ipaserver.install import certs
 from ipaserver.install import installutils
+from ipapython import directivesetter
 from ipapython import dogtag
 from ipapython import ipautil
 from ipapython.dn import DN
 import ipapython.errors
 from ipaserver.install import sysupgrade
 from ipalib import api, x509
-from ipalib.constants import IPAAPI_USER
+from ipalib.constants import IPAAPI_USER, MOD_SSL_VERIFY_DEPTH
 from ipaplatform.constants import constants
 from ipaplatform.tasks import tasks
 from ipaplatform.paths import paths
@@ -103,10 +104,13 @@ class HTTPInstance(service.Service):
             AUTOREDIR='' if auto_redirect else '#',
             CRL_PUBLISH_PATH=paths.PKI_CA_PUBLISH_DIR,
             FONTS_DIR=paths.FONTS_DIR,
+            FONTS_OPENSANS_DIR=paths.FONTS_OPENSANS_DIR,
+            FONTS_FONTAWESOME_DIR=paths.FONTS_FONTAWESOME_DIR,
             GSSAPI_SESSION_KEY=paths.GSSAPI_SESSION_KEY,
             IPA_CUSTODIA_SOCKET=paths.IPA_CUSTODIA_SOCKET,
             IPA_CCACHES=paths.IPA_CCACHES,
             WSGI_PREFIX_DIR=paths.WSGI_PREFIX_DIR,
+            WSGI_PROCESSES=constants.WSGI_PROCESSES,
         )
         self.ca_file = ca_file
         if ca_is_configured is not None:
@@ -154,7 +158,7 @@ class HTTPInstance(service.Service):
         # We do not let the system start IPA components on its own,
         # Instead we reply on the IPA init script to start only enabled
         # components as found in our LDAP configuration tree
-        self.ldap_enable('HTTP', self.fqdn, None, self.suffix)
+        self.ldap_configure('HTTP', self.fqdn, None, self.suffix)
 
     def configure_selinux_for_httpd(self):
         try:
@@ -174,6 +178,16 @@ class HTTPInstance(service.Service):
     def __configure_http(self):
         self.update_httpd_service_ipa_conf()
         self.update_httpd_wsgi_conf()
+
+        # create /etc/httpd/alias, see https://pagure.io/freeipa/issue/7529
+        session_dir = os.path.dirname(self.sub_dict['GSSAPI_SESSION_KEY'])
+        if not os.path.isdir(session_dir):
+            os.makedirs(session_dir)
+        # Must be world-readable / executable
+        os.chmod(session_dir, 0o755)
+        # Restore SELinux context of session_dir /etc/httpd/alias, see
+        # https://pagure.io/freeipa/issue/7662
+        tasks.restore_context(session_dir)
 
         target_fname = paths.HTTPD_IPA_CONF
         http_txt = ipautil.template_file(
@@ -202,16 +216,21 @@ class HTTPInstance(service.Service):
         services.knownservices.gssproxy.restart()
 
     def get_mod_nss_nickname(self):
-        cert = installutils.get_directive(paths.HTTPD_NSS_CONF, 'NSSNickname')
-        nickname = installutils.unquote_directive_value(cert, quote_char="'")
+        cert = directivesetter.get_directive(paths.HTTPD_NSS_CONF,
+                                             'NSSNickname')
+        nickname = directivesetter.unquote_directive_value(cert,
+                                                           quote_char="'")
         return nickname
 
     def backup_ssl_conf(self):
         self.fstore.backup_file(paths.HTTPD_SSL_CONF)
+        self.fstore.backup_file(paths.HTTPD_SSL_SITE_CONF)
 
     def disable_nss_conf(self):
         """
-        Backs up and removes the original nss.conf file.
+        Backs up the original nss.conf file and replace it with the empty one.
+        Empty file avoids recreation of nss.conf in case the package is
+        reinstalled.
 
         There is no safe way to co-exist since there is no safe port
         to make mod_nss use, disable it completely.
@@ -221,20 +240,16 @@ class HTTPInstance(service.Service):
             # (mod_nss -> mod_ssl upgrade scenario)
             if not self.fstore.has_file(paths.HTTPD_NSS_CONF):
                 self.fstore.backup_file(paths.HTTPD_NSS_CONF)
-            installutils.remove_file(paths.HTTPD_NSS_CONF)
+
+        open(paths.HTTPD_NSS_CONF, 'w').close()
 
     def set_mod_ssl_protocol(self):
-        installutils.set_directive(paths.HTTPD_SSL_CONF,
+        directivesetter.set_directive(paths.HTTPD_SSL_CONF,
                                    'SSLProtocol',
                                    '+TLSv1 +TLSv1.1 +TLSv1.2', False)
 
     def set_mod_ssl_logdir(self):
-        installutils.set_directive(paths.HTTPD_SSL_CONF,
-                                   'ErrorLog',
-                                   'logs/error_log', False)
-        installutils.set_directive(paths.HTTPD_SSL_CONF,
-                                   'TransferLog',
-                                   'logs/access_log', False)
+        tasks.setup_httpd_logging()
 
     def disable_mod_ssl_ocsp(self):
         if sysupgrade.get_upgrade_state('http', OCSP_ENABLED) is None:
@@ -266,14 +281,14 @@ class HTTPInstance(service.Service):
 
     def __add_include(self):
         """This should run after __set_mod_nss_port so is already backed up"""
-        if installutils.update_file(paths.HTTPD_SSL_CONF,
+        if installutils.update_file(paths.HTTPD_SSL_SITE_CONF,
                                     '</VirtualHost>',
                                     'Include {path}\n'
                                     '</VirtualHost>'.format(
                                         path=paths.HTTPD_IPA_REWRITE_CONF)
                                     ) != 0:
             self.print_msg("Adding Include conf.d/ipa-rewrite to "
-                           "%s failed." % paths.HTTPD_SSL_CONF)
+                           "%s failed." % paths.HTTPD_SSL_SITE_CONF)
 
     def configure_certmonger_renewal_guard(self):
         certmonger = services.knownservices.certmonger
@@ -306,6 +321,12 @@ class HTTPInstance(service.Service):
                 certmonger.stop()
 
     def __setup_ssl(self):
+        key_passwd_file = paths.HTTPD_PASSWD_FILE_FMT.format(host=api.env.host)
+        with open(key_passwd_file, 'wb') as f:
+            os.fchmod(f.fileno(), 0o600)
+            pkey_passwd = ipautil.ipa_generate_password().encode('utf-8')
+            f.write(pkey_passwd)
+
         if self.pkcs12_info:
             p12_certs, p12_priv_keys = certs.pkcs12_to_certkeys(
                 *self.pkcs12_info)
@@ -332,7 +353,8 @@ class HTTPInstance(service.Service):
             x509.write_certificate(self.cert, paths.HTTPD_CERT_FILE)
             x509.write_pem_private_key(
                 server_certs_keys[0][1],
-                paths.HTTPD_KEY_FILE
+                paths.HTTPD_KEY_FILE,
+                passwd=pkey_passwd
             )
 
             if self.ca_is_configured:
@@ -364,6 +386,8 @@ class HTTPInstance(service.Service):
                     dns=[self.fqdn],
                     post_command='restart_httpd',
                     storage='FILE',
+                    passwd_fname=key_passwd_file,
+                    resubmit_timeout=api.env.replication_wait_timeout
                 )
             finally:
                 if prev_helper is not None:
@@ -377,7 +401,7 @@ class HTTPInstance(service.Service):
 
             with open(paths.HTTPD_KEY_FILE, 'rb') as f:
                 priv_key = x509.load_pem_private_key(
-                    f.read(), None, backend=x509.default_backend())
+                    f.read(), pkey_passwd, backend=x509.default_backend())
 
             # Verify we have a valid server cert
             if (priv_key.public_key().public_numbers()
@@ -390,15 +414,25 @@ class HTTPInstance(service.Service):
 
     def configure_mod_ssl_certs(self):
         """Configure the mod_ssl certificate directives"""
-        installutils.set_directive(paths.HTTPD_SSL_CONF,
+        directivesetter.set_directive(paths.HTTPD_SSL_SITE_CONF,
                                    'SSLCertificateFile',
                                    paths.HTTPD_CERT_FILE, False)
-        installutils.set_directive(paths.HTTPD_SSL_CONF,
+        directivesetter.set_directive(paths.HTTPD_SSL_SITE_CONF,
                                    'SSLCertificateKeyFile',
                                    paths.HTTPD_KEY_FILE, False)
-        installutils.set_directive(paths.HTTPD_SSL_CONF,
+        directivesetter.set_directive(
+            paths.HTTPD_SSL_CONF,
+            'SSLPassPhraseDialog',
+            'exec:{passread}'.format(passread=paths.IPA_HTTPD_PASSWD_READER),
+            False)
+        directivesetter.set_directive(paths.HTTPD_SSL_SITE_CONF,
                                    'SSLCACertificateFile',
                                    paths.IPA_CA_CRT, False)
+        # set SSLVerifyDepth for external CA installations
+        directivesetter.set_directive(paths.HTTPD_SSL_CONF,
+                                   'SSLVerifyDepth',
+                                   MOD_SSL_VERIFY_DEPTH,
+                                   quotes=False)
 
     def __publish_ca_cert(self):
         ca_subject = self.cert.issuer
@@ -408,7 +442,7 @@ class HTTPInstance(service.Service):
             raise RuntimeError("HTTPD cert was issued by an unknown CA.")
         # at this time we can assume any CA cert will be valid since this is
         # only run during installation
-        x509.write_certificate(ca_certs[0], paths.CA_CRT)
+        x509.write_certificate_list(certlist, paths.CA_CRT, mode=0o644)
 
     def is_kdcproxy_configured(self):
         """Check if KDC proxy has already been configured in the past"""
@@ -488,7 +522,7 @@ class HTTPInstance(service.Service):
                              'external-helper', helper)
 
         for f in [paths.HTTPD_IPA_CONF, paths.HTTPD_SSL_CONF,
-                  paths.HTTPD_NSS_CONF]:
+                  paths.HTTPD_SSL_SITE_CONF, paths.HTTPD_NSS_CONF]:
             try:
                 self.fstore.restore_file(f)
             except ValueError as error:
@@ -500,6 +534,7 @@ class HTTPInstance(service.Service):
             paths.HTTP_CCACHE,
             paths.HTTPD_CERT_FILE,
             paths.HTTPD_KEY_FILE,
+            paths.HTTPD_PASSWD_FILE_FMT.format(host=api.env.host),
             paths.HTTPD_IPA_REWRITE_CONF,
             paths.HTTPD_IPA_CONF,
             paths.HTTPD_IPA_PKI_PROXY_CONF,
@@ -540,7 +575,7 @@ class HTTPInstance(service.Service):
         if running:
             self.restart()
 
-        # disabled by default, by ldap_enable()
+        # disabled by default, by ldap_configure()
         if enabled:
             self.enable()
 
@@ -582,7 +617,11 @@ class HTTPInstance(service.Service):
                 else:
                     remote_ldap.simple_bind(ipaldap.DIRMAN_DN,
                                             self.dm_password)
-                replication.wait_for_entry(remote_ldap, service_dn, timeout=60)
+                replication.wait_for_entry(
+                    remote_ldap,
+                    service_dn,
+                    timeout=api.env.replication_wait_timeout
+                )
 
     def migrate_to_mod_ssl(self):
         """For upgrades only, migrate from mod_nss to mod_ssl"""
@@ -595,9 +634,18 @@ class HTTPInstance(service.Service):
             certs.install_pem_from_p12(temp.name,
                                        pk12_password,
                                        paths.HTTPD_CERT_FILE)
+
+            passwd_fname = paths.HTTPD_PASSWD_FILE_FMT.format(
+                            host=api.env.host)
+            with open(passwd_fname, 'wb') as passwd_file:
+                os.fchmod(passwd_file.fileno(), 0o600)
+                passwd_file.write(
+                    ipautil.ipa_generate_password().encode('utf-8'))
+
             certs.install_key_from_p12(temp.name,
                                        pk12_password,
-                                       paths.HTTPD_KEY_FILE)
+                                       paths.HTTPD_KEY_FILE,
+                                       out_passwd_fname=passwd_fname)
 
         self.backup_ssl_conf()
         self.configure_mod_ssl_certs()

@@ -25,7 +25,8 @@ import six
 # The Python re module doesn't do nested parenthesis
 
 # Break the ACI into 3 pieces: target, name, permissions/bind_rules
-ACIPat = re.compile(r'\(version\s+3.0\s*;\s*ac[li]\s+\"([^\"]*)\"\s*;\s*([^;]*);\s*\)', re.UNICODE)
+ACIPat = re.compile(r'\(version\s+3.0\s*;\s*ac[li]\s+\"([^\"]*)\"\s*;'
+                    r'\s*(.*);\s*\)', re.UNICODE)
 
 # Break the permissions/bind_rules out
 PermPat = re.compile(r'(\w+)\s*\(([^()]*)\)\s*(.*)', re.UNICODE)
@@ -40,7 +41,7 @@ PERMISSIONS = ["read", "write", "add", "delete", "search", "compare",
                "selfwrite", "proxy", "all"]
 
 
-class ACI(object):
+class ACI:
     """
     Holds the basic data for an ACI entry, as stored in the cn=accounts
     entry in LDAP.  Has methods to parse an ACI string and export to an
@@ -112,10 +113,10 @@ class ACI(object):
             if token == "(":
                 var = next(lexer).strip()
                 operator = next(lexer)
-                if operator != "=" and operator != "!=":
+                if operator not in ("=", "!="):
                     # Peek at the next char before giving up
                     operator = operator + next(lexer)
-                    if operator != "=" and operator != "!=":
+                    if operator not in ("=", "!="):
                         raise SyntaxError("No operator in target, got '%s'" % operator)
                 op = operator
                 val = next(lexer).strip()
@@ -126,7 +127,7 @@ class ACI(object):
 
             if var == 'targetattr':
                 # Make a string of the form attr || attr || ... into a list
-                t = re.split('[^a-zA-Z0-9;\*]+', val)
+                t = re.split(r'[^a-zA-Z0-9;\*]+', val)
                 self.target[var] = {}
                 self.target[var]['operator'] = op
                 self.target[var]['expression'] = t
@@ -164,7 +165,7 @@ class ACI(object):
                 raise SyntaxError("invalid permission: '%s'" % p)
         if not self.name:
             raise SyntaxError("name must be set")
-        if not isinstance(self.name, six.string_types):
+        if not isinstance(self.name, str):
             raise SyntaxError("name must be a string")
         if not isinstance(self.target, dict) or len(self.target) == 0:
             raise SyntaxError("target must be a non-empty dictionary")

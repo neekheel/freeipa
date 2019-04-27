@@ -208,6 +208,7 @@ return {
     ],
 
     adder_dialog: {
+        title: '@i18n:objects.idview.add',
         fields: [
             'cn',
             {
@@ -215,6 +216,9 @@ return {
                 name: 'description'
             }
         ]
+    },
+    deleter_dialog: {
+        title: '@i18n:objects.idview.remove'
     }
 };};
 
@@ -288,6 +292,7 @@ return {
     ],
 
     adder_dialog: {
+        title: '@i18n:objects.idview.add_user',
         policies: [
             { $factory: idviews.idoverride_adder_policy }
         ],
@@ -317,6 +322,10 @@ return {
                 $type: 'cert_textarea',
                 name: 'usercertificate'
             },
+            {
+                $type: 'sshkey',
+                name: 'ipasshpubkey'
+            },
             'loginshell',
             'homedirectory',
             {
@@ -324,6 +333,9 @@ return {
                 name: 'description'
             }
         ]
+    },
+    deleter_dialog: {
+        title: '@i18n:objects.idview.remove_users'
     }
 };};
 
@@ -376,6 +388,7 @@ return {
     ],
 
     adder_dialog: {
+        title: '@i18n:objects.idview.add_group',
         policies: [
             { $factory: idviews.idoverride_adder_policy }
         ],
@@ -404,6 +417,9 @@ return {
                 name: 'description'
             }
         ]
+    },
+    deleter_dialog: {
+        title: '@i18n:objects.idview.remove_groups'
     }
 };};
 
@@ -448,6 +464,12 @@ idviews.id_override_user_details_facet = function(spec) {
         batch.add_command(certs);
 
         return batch;
+    };
+
+    that.update_on_success = function(data, text_status, xhr) {
+        that.on_update.notify();
+        that.nofify_update_success();
+        that.refresh();
     };
 
     return that;
@@ -696,10 +718,8 @@ idviews.apply_action = function(spec) {
 
         var pkey = facet.get_pkey();
         var other_entity = reg.entity.get(that.other_entity);
-        var other_entity_label = other_entity.metadata.label;
         var exclude = that.get_exclude(facet);
         var title = text.get(that.dialog_title);
-        title = title.replace('${entity}', other_entity_label);
         title = title.replace('${primary_key}', pkey);
 
         var dialog = IPA.association_adder_dialog({

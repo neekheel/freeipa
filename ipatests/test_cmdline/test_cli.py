@@ -1,14 +1,16 @@
 import contextlib
 import os
+from io import StringIO
 import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import six
-from six import StringIO
 
 from ipatests import util
+from ipatests.test_ipalib.test_x509 import goodcert_headers
 from ipalib import api, errors
 import pytest
 
@@ -23,7 +25,7 @@ BASE_DIR = os.path.abspath(os.path.join(HERE, os.pardir, os.pardir))
 
 @pytest.mark.tier0
 @pytest.mark.needs_ipaapi
-class TestCLIParsing(object):
+class TestCLIParsing:
     """Tests that commandlines are correctly parsed to Command keyword args
     """
     def check_command(self, commandline, expected_command_name, **kw_expected):
@@ -312,6 +314,16 @@ class TestCLIParsing(object):
         if not adtrust_is_enabled:
             mockldap.del_entry(adtrust_dn)
 
+    def test_certfind(self):
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(goodcert_headers)
+            f.flush()
+            self.check_command(
+                'cert_find --file={}'.format(f.name),
+                'cert_find',
+                file=goodcert_headers
+            )
+
 
 def test_cli_fsencoding():
     # https://pagure.io/freeipa/issue/5887
@@ -321,6 +333,9 @@ def test_cli_fsencoding():
     }
     env['LC_ALL'] = 'C'
     env['PYTHONPATH'] = BASE_DIR
+    # override confdir so test always fails and does not depend on an
+    # existing installation.
+    env['IPA_CONFDIR'] = '/'
     p = subprocess.Popen(
         [sys.executable, '-m', 'ipaclient', 'help'],
         stdout=subprocess.PIPE,
@@ -328,5 +343,68 @@ def test_cli_fsencoding():
         env=env,
     )
     out, err = p.communicate()
-    assert p.returncode > 0, (out, err)
-    assert b'System encoding must be UTF-8' in err, (out, err)
+
+    assert p.returncode != 0, (out, err)
+    if sys.version_info >= (3, 7):
+        # Python 3.7+ has PEP 538: Legacy C Locale Coercion
+        assert b'IPA client is not configured' in err, (out, err)
+    else:
+        # Python 3.6 does not support UTF-8 fs encoding with non-UTF LC
+        assert b'System encoding must be UTF-8' in err, (out, err)
+
+
+IPA_NOT_CONFIGURED = b'IPA is not configured on this system'
+IPA_CLIENT_NOT_CONFIGURED = b'IPA client is not configured on this system'
+
+
+@pytest.mark.needs_ipaapi
+@pytest.mark.skipif(
+    os.geteuid() != 0 or os.path.isfile('/etc/ipa/default.conf'),
+    reason="Must have root privileges to run this test "
+           "and IPA must not be installed")
+@pytest.mark.parametrize(
+    "args, retcode, output, error",
+    [
+        # Commands delivered by the client pkg
+        (['ipa'], 1, None, IPA_CLIENT_NOT_CONFIGURED),
+        (['ipa-certupdate'], 1, None, IPA_CLIENT_NOT_CONFIGURED),
+        (['ipa-client-automount'], 1, IPA_CLIENT_NOT_CONFIGURED, None),
+        # Commands delivered by the server pkg
+        (['ipa-adtrust-install'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-advise'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-backup'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-cacert-manage'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-ca-install'], 1, None,
+         b'IPA server is not configured on this system'),
+        (['ipa-compat-manage'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-crlgen-manage'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-csreplica-manage'], 1, None, IPA_NOT_CONFIGURED),
+        (['ipactl', 'status'], 4, None, b'IPA is not configured'),
+        (['ipa-dns-install'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-kra-install'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-ldap-updater',
+          '/usr/share/ipa/updates/05-pre_upgrade_plugins.update'],
+         2, None, IPA_NOT_CONFIGURED),
+        (['ipa-managed-entries'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-nis-manage'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-pkinit-manage'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-replica-manage', 'list'], 1, IPA_NOT_CONFIGURED, None),
+        (['ipa-server-certinstall'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-server-upgrade'], 2, None, IPA_NOT_CONFIGURED),
+        (['ipa-winsync-migrate'], 1, None, IPA_NOT_CONFIGURED)
+    ])
+def test_command_ipa_not_installed(args, retcode, output, error):
+    """
+    Test that the commands properly return that IPA client|server is not
+    configured on this system.
+    Launch the command specified in args.
+    Check that the exit code is as expected and that stdout and stderr
+    contain the expected strings.
+    """
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = p.communicate()
+    assert retcode == p.returncode
+    if output:
+        assert output in out
+    if error:
+        assert error in err

@@ -34,20 +34,24 @@ import socket
 import re
 import datetime
 import netaddr
-import netifaces
 import time
 import pwd
 import grp
 from contextlib import contextmanager
 import locale
 import collections
+import urllib
 
 from dns import resolver, reversename
 from dns.exception import DNSException
 
 import six
 from six.moves import input
-from six.moves import urllib
+
+try:
+    import netifaces
+except ImportError:
+    netifaces = None
 
 from ipapython.dn import DN
 
@@ -197,6 +201,8 @@ class CheckedIPAddress(UnsafeIPAddress):
         :return: InterfaceDetails named tuple or None if no interface has
         this address
         """
+        if netifaces is None:
+            raise ImportError("netifaces")
         logger.debug("Searching for an interface of IP address: %s", self)
         if self.version == 4:
             family = netifaces.AF_INET
@@ -447,7 +453,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
     p_out = None
     p_err = None
 
-    if isinstance(nolog, six.string_types):
+    if isinstance(nolog, str):
         # We expect a tuple (or list, or other iterable) of nolog strings.
         # Passing just a single string is bad: strings are iterable, so this
         # would result in every individual character of that string being
@@ -491,20 +497,21 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
     logger.debug('Starting external process')
     logger.debug('args=%s', arg_string)
 
+    if runas is not None:
+        pent = pwd.getpwnam(runas)
+
+        suplementary_gids = [
+            grp.getgrnam(sgroup).gr_gid for sgroup in suplementary_groups
+        ]
+
+        logger.debug('runas=%s (UID %d, GID %s)', runas,
+                     pent.pw_uid, pent.pw_gid)
+        if suplementary_groups:
+            for group, gid in zip(suplementary_groups, suplementary_gids):
+                logger.debug('suplementary_group=%s (GID %d)', group, gid)
+
     def preexec_fn():
         if runas is not None:
-            pent = pwd.getpwnam(runas)
-
-            suplementary_gids = [
-                grp.getgrnam(group).gr_gid for group in suplementary_groups
-            ]
-
-            logger.debug('runas=%s (UID %d, GID %s)', runas,
-                         pent.pw_uid, pent.pw_gid)
-            if suplementary_groups:
-                for group, gid in zip(suplementary_groups, suplementary_gids):
-                    logger.debug('suplementary_group=%s (GID %d)', group, gid)
-
             os.setgroups(suplementary_gids)
             os.setregid(pent.pw_gid, pent.pw_gid)
             os.setreuid(pent.pw_uid, pent.pw_uid)
@@ -513,6 +520,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
             os.umask(umask)
 
     try:
+        # pylint: disable=subprocess-popen-preexec-fn
         p = subprocess.Popen(args, stdin=p_in, stdout=p_out, stderr=p_err,
                              close_fds=True, env=env, cwd=cwd,
                              preexec_fn=preexec_fn)
@@ -583,7 +591,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
 def nolog_replace(string, nolog):
     """Replace occurences of strings given in `nolog` with XXXXXXXX"""
     for value in nolog:
-        if not value or not isinstance(value, six.string_types):
+        if not value or not isinstance(value, str):
             continue
 
         quoted = urllib.parse.quote(value)
@@ -952,7 +960,7 @@ def user_input(prompt, default = None, allow_empty = True):
                     return ''
                 raise RuntimeError("Failed to get user input")
 
-    if isinstance(default, six.string_types):
+    if isinstance(default, str):
         while True:
             try:
                 ret = input("%s [%s]: " % (prompt, default))
@@ -1037,6 +1045,55 @@ def host_port_open(host, port, socket_type=socket.SOCK_STREAM,
     return port_open
 
 
+def check_port_bindable(port, socket_type=socket.SOCK_STREAM):
+    """Check if a port is free and not bound by any other application
+
+    :param port: port number
+    :param socket_type: type (SOCK_STREAM for TCP, SOCK_DGRAM for UDP)
+
+    Returns True if the port is free, False otherwise
+    """
+    if socket_type == socket.SOCK_STREAM:
+        proto = 'TCP'
+    elif socket_type == socket.SOCK_DGRAM:
+        proto = 'UDP'
+    else:
+        raise ValueError(socket_type)
+
+    # Detect dual stack or IPv4 single stack
+    try:
+        s = socket.socket(socket.AF_INET6, socket_type)
+        anyaddr = '::'
+        logger.debug(
+            "check_port_bindable: Checking IPv4/IPv6 dual stack and %s",
+            proto
+        )
+    except socket.error:
+        s = socket.socket(socket.AF_INET, socket_type)
+        anyaddr = ''
+        logger.debug("check_port_bindable: Checking IPv4 only and %s", proto)
+
+    # Attempt to bind
+    try:
+        if socket_type == socket.SOCK_STREAM:
+            # reuse TCP sockets in TIME_WAIT state
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        s.bind((anyaddr, port))
+    except socket.error as e:
+        logger.debug(
+            "check_port_bindable: failed to bind to port %i/%s: %s",
+            port, proto, e
+        )
+        return False
+    else:
+        logger.debug(
+            "check_port_bindable: bind success: %i/%s", port, proto
+        )
+        return True
+    finally:
+        s.close()
+
+
 def reverse_record_exists(ip_address):
     """
     Checks if IP address have some reverse record somewhere.
@@ -1053,13 +1110,16 @@ def reverse_record_exists(ip_address):
     return True
 
 
-def config_replace_variables(filepath, replacevars=dict(), appendvars=dict()):
+def config_replace_variables(filepath, replacevars=dict(), appendvars=dict(),
+                             removevars=None):
     """
     Take a key=value based configuration file, and write new version
-    with certain values replaced or appended
+    with certain values replaced, appended, or removed.
 
     All (key,value) pairs from replacevars and appendvars that were not found
     in the configuration file, will be added there.
+
+    All entries in set removevars are removed.
 
     It is responsibility of a caller to ensure that replacevars and
     appendvars do not overlap.
@@ -1102,7 +1162,11 @@ $)''', re.VERBOSE)
                             elif value.find(appendvars[option]) == -1:
                                 new_line = u"%s=%s %s\n" % (option, value, appendvars[option])
                             old_values[option] = value
-                new_config.write(new_line)
+                        if removevars and option in removevars:
+                            old_values[option] = value
+                            new_line = None
+                if new_line is not None:
+                    new_config.write(new_line)
         # Now add all options from replacevars and appendvars that were not found in the file
         new_vars = replacevars.copy()
         new_vars.update(appendvars)
@@ -1388,14 +1452,14 @@ if six.PY2:
         Decode argument using the file system encoding, as returned by
         `sys.getfilesystemencoding()`.
         """
-        if isinstance(value, six.binary_type):
+        if isinstance(value, bytes):
             return value.decode(sys.getfilesystemencoding())
-        elif isinstance(value, six.text_type):
+        elif isinstance(value, str):
             return value
         else:
             raise TypeError("expect {0} or {1}, not {2}".format(
-                six.binary_type.__name__,
-                six.text_type.__name__,
+                bytes.__name__,
+                str.__name__,
                 type(value).__name__))
 else:
     fsdecode = os.fsdecode  #pylint: disable=no-member
@@ -1471,7 +1535,7 @@ def decode_json(data):
         # default
         return 'utf-8'
 
-    if isinstance(data, six.text_type):
+    if isinstance(data, str):
         return data
 
     return data.decode(detect_encoding(data), 'surrogatepass')

@@ -3,7 +3,7 @@
 FreeIPA allows Linux administrators to centrally manage identity,
 authentication and access control aspects of Linux and UNIX systems
 by providing simple to install and use command line and web based
-managment tools.
+management tools.
 
 FreeIPA is built on top of well known Open Source components and standard
 protocols with a very strong focus on ease of management and automation
@@ -75,5 +75,5 @@ Please see the file called COPYING.
   https://pagure.io/freeipa/issues
 * If you want to participate in actively developing IPA please
   subscribe to the freeipa-devel mailing list at
-  https://www.redhat.com/mailman/listinfo/freeipa-devel/ or join
+  https://lists.fedoraproject.org/archives/list/freeipa-devel@lists.fedorahosted.org/ or join
   us in IRC at <irc://irc.freenode.net/freeipa>

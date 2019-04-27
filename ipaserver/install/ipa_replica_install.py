@@ -2,6 +2,8 @@
 # Copyright (C) 2015  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 from ipapython.install import cli
 from ipapython.install.core import knob, extend_knob
 from ipaplatform.paths import paths
@@ -18,11 +20,7 @@ class CompatServerReplicaInstall(ServerReplicaInstall):
     request_cert = False
     ca_file = None
     zonemgr = None
-
-    replica_file = extend_knob(
-        ServerReplicaInstall.replica_file,  # pylint: disable=no-member
-        cli_names='replica_file',
-    )
+    replica_install = True  # Used in ServerInstallInterface.__init__
 
     auto_password = knob(
         str, None,
@@ -41,9 +39,6 @@ class CompatServerReplicaInstall(ServerReplicaInstall):
             return self.__dm_password
         except AttributeError:
             pass
-
-        if self.replica_file is not None:
-            return self.auto_password
 
         return super(CompatServerReplicaInstall, self).dm_password
 
@@ -67,7 +62,7 @@ class CompatServerReplicaInstall(ServerReplicaInstall):
 
     @admin_password.default_getter
     def admin_password(self):
-        if self.replica_file is None and self.principal:
+        if self.principal:
             return self.auto_password
 
         return super(CompatServerReplicaInstall, self).admin_password
@@ -76,8 +71,7 @@ class CompatServerReplicaInstall(ServerReplicaInstall):
     def host_password(self):
         admin_password = (
             super(CompatServerReplicaInstall, self).admin_password)
-        if (self.replica_file is None and
-                (not self.principal or admin_password)):
+        if not self.principal or admin_password:
             return self.auto_password
 
         return super(CompatServerReplicaInstall, self).host_password
@@ -87,7 +81,9 @@ ReplicaInstall = cli.install_tool(
     CompatServerReplicaInstall,
     command_name='ipa-replica-install',
     log_file_name=paths.IPAREPLICA_INSTALL_LOG,
+    console_format='%(message)s',
     debug_option=True,
+    verbose=True,
 )
 
 

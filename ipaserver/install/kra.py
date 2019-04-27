@@ -6,17 +6,16 @@
 KRA installer module
 """
 
+from __future__ import absolute_import
+
 import os
-import shutil
 
 from ipalib import api
 from ipalib.install.kinit import kinit_keytab
 from ipaplatform import services
 from ipaplatform.paths import paths
-from ipapython import certdb
 from ipapython import ipautil
 from ipapython.install.core import group
-from ipaserver.install import custodiainstance
 from ipaserver.install import cainstance
 from ipaserver.install import krainstance
 from ipaserver.install import dsinstance
@@ -51,24 +50,8 @@ def install_check(api, replica_config, options):
                 "KRA is not installed on the master system. Please use "
                 "'ipa-kra-install' command to install the first instance.")
 
-        if options.promote:
-            return
 
-        with certdb.NSSDatabase() as tmpdb:
-            tmpdb.create_db()
-            tmpdb.import_pkcs12(replica_config.dir + "/cacert.p12",
-                                replica_config.dirman_password)
-            kra_cert_nicknames = [
-                "storageCert cert-pki-kra", "transportCert cert-pki-kra",
-                "auditSigningCert cert-pki-kra"
-            ]
-            if not all(tmpdb.has_nickname(nickname)
-                       for nickname in kra_cert_nicknames):
-                raise RuntimeError("Missing KRA certificates, please create a "
-                                   "new replica file.")
-
-
-def install(api, replica_config, options):
+def install(api, replica_config, options, custodia):
     if replica_config is None:
         if not options.setup_kra:
             return
@@ -84,27 +67,15 @@ def install(api, replica_config, options):
         if not replica_config.setup_kra:
             return
         krafile = os.path.join(replica_config.dir, 'kracert.p12')
-        if options.promote:
-            with ipautil.private_ccache():
-                ccache = os.environ['KRB5CCNAME']
-                kinit_keytab(
-                    'host/{env.host}@{env.realm}'.format(env=api.env),
-                    paths.KRB5_KEYTAB,
-                    ccache)
-                custodia = custodiainstance.CustodiaInstance(
-                    replica_config.host_name,
-                    replica_config.realm_name)
-                custodia.get_kra_keys(
-                    replica_config.kra_host_name,
-                    krafile,
-                    replica_config.dirman_password)
-        else:
-            cafile = os.path.join(replica_config.dir, 'cacert.p12')
-            if not os.path.isfile(cafile):
-                raise RuntimeError(
-                    "Unable to clone KRA."
-                    "  cacert.p12 file not found in replica file")
-            shutil.copy(cafile, krafile)
+        with ipautil.private_ccache():
+            ccache = os.environ['KRB5CCNAME']
+            kinit_keytab(
+                'host/{env.host}@{env.realm}'.format(env=api.env),
+                paths.KRB5_KEYTAB,
+                ccache)
+            custodia.get_kra_keys(
+                krafile,
+                replica_config.dirman_password)
 
         realm_name = replica_config.realm_name
         dm_password = replica_config.dirman_password
@@ -113,14 +84,17 @@ def install(api, replica_config, options):
 
         pkcs12_info = (krafile,)
         master_host = replica_config.kra_host_name
-        promote = options.promote
+        promote = True
 
     kra = krainstance.KRAInstance(realm_name)
-    kra.configure_instance(realm_name, host_name, dm_password, dm_password,
-                           subject_base=subject_base,
-                           pkcs12_info=pkcs12_info,
-                           master_host=master_host,
-                           promote=promote)
+    kra.configure_instance(
+        realm_name, host_name, dm_password, dm_password,
+        subject_base=subject_base,
+        pkcs12_info=pkcs12_info,
+        master_host=master_host,
+        promote=promote,
+        pki_config_override=options.pki_config_override,
+    )
 
     _service.print_msg("Restarting the directory server")
     ds = dsinstance.DsInstance()

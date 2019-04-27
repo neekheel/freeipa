@@ -61,17 +61,17 @@ def split_principal_name(principal_name):
 
 
 @six.python_2_unicode_compatible
-class Principal(object):
+class Principal:
     """
     Container for the principal name and realm according to RFC 1510
     """
     def __init__(self, components, realm=None):
-        if isinstance(components, six.binary_type):
+        if isinstance(components, bytes):
             raise TypeError(
                 "Cannot create a principal object from bytes: {!r}".format(
                     components)
             )
-        elif isinstance(components, six.string_types):
+        elif isinstance(components, str):
             # parse principal components from realm
             self.components, self.realm = self._parse_from_text(
                 components, realm)
@@ -109,7 +109,7 @@ class Principal(object):
         return hash(self.components + (self.realm,))
 
     def _parse_from_text(self, principal, realm=None):
-        """
+        r"""
         parse individual principal name components from the string
         representation of the principal. This is done in three steps:
             1.) split the string at the unescaped '@'

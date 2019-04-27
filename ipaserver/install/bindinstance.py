@@ -40,6 +40,8 @@ from ipaserver.dns_data_management import (
 from ipaserver.install import installutils
 from ipaserver.install import service
 from ipaserver.install import sysupgrade
+from ipaserver.masters import get_masters
+from ipapython import ipaldap
 from ipapython import ipautil
 from ipapython import dnsutil
 from ipapython.dnsutil import DNSName
@@ -49,6 +51,7 @@ import ipalib
 from ipalib import api, errors
 from ipalib.constants import IPA_CA_RECORD
 from ipaplatform import services
+from ipaplatform.tasks import tasks
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipalib.util import (validate_zonemgr_str, normalize_zonemgr,
@@ -93,6 +96,10 @@ def create_reverse():
 
 
 def named_conf_exists():
+    """
+    Checks that named.conf exists AND that it contains IPA-related config.
+
+    """
     try:
         with open(paths.NAMED_CONF, 'r') as named_fd:
             lines = named_fd.readlines()
@@ -137,6 +144,7 @@ def named_conf_get_directive(name, section=NAMED_SECTION_IPA, str_val=True):
 
                 if match and name == match.group('name'):
                     return match.group('value')
+    return None
 
 
 def named_conf_set_directive(name, value, section=NAMED_SECTION_IPA,
@@ -196,7 +204,7 @@ def named_conf_set_directive(name, value, section=NAMED_SECTION_IPA,
                     if name == match.group('name'):
                         matched = True
                         if value is not None:
-                            if not isinstance(value, six.string_types):
+                            if not isinstance(value, str):
                                 value = str(value)
                             new_conf = named_conf_arg_template \
                                     % dict(indent=last_indent,
@@ -308,7 +316,7 @@ def read_reverse_zone(default, ip_address, allow_zone_overlap=False):
     return normalize_zone(zone)
 
 
-def get_auto_reverse_zones(ip_addresses):
+def get_auto_reverse_zones(ip_addresses, allow_zone_overlap=False):
     auto_zones = []
     for ip in ip_addresses:
         if ipautil.reverse_record_exists(ip):
@@ -316,12 +324,13 @@ def get_auto_reverse_zones(ip_addresses):
             logger.info("Reverse record for IP address %s already exists", ip)
             continue
         default_reverse = get_reverse_zone_default(ip)
-        try:
-            dnsutil.check_zone_overlap(default_reverse)
-        except ValueError:
-            logger.info("Reverse zone %s for IP address %s already exists",
-                        default_reverse, ip)
-            continue
+        if not allow_zone_overlap:
+            try:
+                dnsutil.check_zone_overlap(default_reverse)
+            except ValueError:
+                logger.info("Reverse zone %s for IP address %s already exists",
+                            default_reverse, ip)
+                continue
         auto_zones.append((ip, default_reverse))
     return auto_zones
 
@@ -431,26 +440,32 @@ def zonemgr_callback(option, opt_str, value, parser):
     """
     if value is not None:
         # validate the value first
-        try:
-            # IDNA support requires unicode
-            encoding = getattr(sys.stdin, 'encoding', None)
-            if encoding is None:
-                encoding = 'utf-8'
+        if six.PY3:
+            try:
+                validate_zonemgr_str(value)
+            except ValueError as e:
+                parser.error("invalid zonemgr: {}".format(e))
+        else:
+            try:
+                # IDNA support requires unicode
+                encoding = getattr(sys.stdin, 'encoding', None)
+                if encoding is None:
+                    encoding = 'utf-8'
 
-            # value is of a string type in both py2 and py3
-            if not isinstance(value, unicode):
-                value = value.decode(encoding)
+                # value is of a string type in both py2 and py3
+                if not isinstance(value, unicode):
+                    value = value.decode(encoding)
 
-            validate_zonemgr_str(value)
-        except ValueError as e:
-            # FIXME we can do this in better way
-            # https://fedorahosted.org/freeipa/ticket/4804
-            # decode to proper stderr encoding
-            stderr_encoding = getattr(sys.stderr, 'encoding', None)
-            if stderr_encoding is None:
-                stderr_encoding = 'utf-8'
-            error = unicode(e).encode(stderr_encoding)
-            parser.error(b"invalid zonemgr: " + error)
+                validate_zonemgr_str(value)
+            except ValueError as e:
+                # FIXME we can do this in better way
+                # https://fedorahosted.org/freeipa/ticket/4804
+                # decode to proper stderr encoding
+                stderr_encoding = getattr(sys.stderr, 'encoding', None)
+                if stderr_encoding is None:
+                    stderr_encoding = 'utf-8'
+                error = unicode(e).encode(stderr_encoding)
+                parser.error(b"invalid zonemgr: " + error)
 
     parser.values.zonemgr = value
 
@@ -499,7 +514,8 @@ def check_reverse_zones(ip_addresses, reverse_zones, options, unattended,
             ips_missing_reverse.append(ip)
 
     # create reverse zone for IP addresses that does not have one
-    for (ip, rz) in get_auto_reverse_zones(ips_missing_reverse):
+    for (ip, rz) in get_auto_reverse_zones(ips_missing_reverse,
+                                           options.allow_zone_overlap):
         if options.auto_reverse:
             logger.info("Reverse zone %s will be created", rz)
             checked_reverse_zones.append(rz)
@@ -572,7 +588,7 @@ def ensure_dnsserver_container_exists(ldap, api_instance, logger=logger):
         logger.debug('cn=servers,cn=dns container already exists')
 
 
-class DnsBackup(object):
+class DnsBackup:
     def __init__(self, service):
         self.service = service
         self.zones = {}
@@ -682,7 +698,7 @@ class BindInstance(service.Service):
         return normalize_zone(self.host_domain) == normalize_zone(self.domain)
 
     def create_file_with_system_records(self):
-        system_records = IPASystemRecords(self.api)
+        system_records = IPASystemRecords(self.api, all_servers=True)
         text = u'\n'.join(
             IPASystemRecords.records_list_from_zone(
                 system_records.get_base_records()
@@ -759,7 +775,7 @@ class BindInstance(service.Service):
         # Instead we reply on the IPA init script to start only enabled
         # components as found in our LDAP configuration tree
         try:
-            self.ldap_enable('DNS', self.fqdn, None, self.suffix)
+            self.ldap_configure('DNS', self.fqdn, None, self.suffix)
         except errors.DuplicateEntry:
             # service already exists (forced DNS reinstall)
             # don't crash, just report error
@@ -790,7 +806,7 @@ class BindInstance(service.Service):
 
         self.sub_dict = dict(
             FQDN=self.fqdn,
-            SERVER_ID=installutils.realm_to_serverid(self.realm),
+            SERVER_ID=ipaldap.realm_to_serverid(self.realm),
             SUFFIX=self.suffix,
             BINDKEYS_FILE=paths.NAMED_BINDKEYS_FILE,
             MANAGED_KEYS_DIR=paths.NAMED_MANAGED_KEYS_DIR,
@@ -801,6 +817,8 @@ class BindInstance(service.Service):
             NAMED_VAR_DIR=paths.NAMED_VAR_DIR,
             BIND_LDAP_SO=paths.BIND_LDAP_SO,
             INCLUDE_CRYPTO_POLICY=crypto_policy,
+            NAMED_DATA_DIR=constants.NAMED_DATA_DIR,
+            NAMED_ZONE_COMMENT=constants.NAMED_ZONE_COMMENT,
         )
 
     def __setup_dns_container(self):
@@ -865,10 +883,13 @@ class BindInstance(service.Service):
 
         # Add forward and reverse records to self
         for addr in addrs:
-            try:
+            # Check first if the zone is a master zone
+            # (if it is a forward zone, dns_zone_exists will return False)
+            if dns_zone_exists(zone, api=self.api):
                 add_fwd_rr(zone, host, addr, self.api)
-            except errors.NotFound:
-                pass
+            else:
+                logger.debug("Skip adding record %s to a zone %s "
+                             "not managed by IPA", addr, zone)
 
             reverse_zone = find_reverse_zone(addr, self.api)
             if reverse_zone:
@@ -879,8 +900,7 @@ class BindInstance(service.Service):
 
     def __add_others(self):
         entries = api.Backend.ldap2.get_entries(
-            DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
-               self.suffix),
+            DN(api.env.container_masters, self.suffix),
             api.Backend.ldap2.SCOPE_ONELEVEL, None, ['dn'])
 
         for entry in entries:
@@ -988,32 +1008,25 @@ class BindInstance(service.Service):
         sysupgrade.set_upgrade_state('dns', 'server_config_to_ldap', True)
 
     def __setup_resolv_conf(self):
-        if not self.fstore.has_file(paths.RESOLV_CONF):
-            self.fstore.backup_file(paths.RESOLV_CONF)
-
-        resolv_txt = "search "+self.domain+"\n"
+        searchdomains = [self.domain]
+        nameservers = []
 
         for ip_address in self.ip_addresses:
             if ip_address.version == 4:
-                resolv_txt += "nameserver 127.0.0.1\n"
-                break
+                nameservers.append("127.0.0.1")
+            elif ip_address.version == 6:
+                nameservers.append("::1")
 
-        for ip_address in self.ip_addresses:
-            if ip_address.version == 6:
-                resolv_txt += "nameserver ::1\n"
-                break
         try:
-            resolv_fd = open(paths.RESOLV_CONF, 'w')
-            resolv_fd.seek(0)
-            resolv_fd.truncate(0)
-            resolv_fd.write(resolv_txt)
-            resolv_fd.close()
+            tasks.configure_dns_resolver(
+                nameservers, searchdomains, fstore=self.fstore
+            )
         except IOError as e:
-            logger.error('Could not write to resolv.conf: %s', e)
+            logger.error('Could not update DNS config: %s', e)
         else:
             # python DNS might have global resolver cached in this variable
             # we have to re-initialize it because resolv.conf has changed
-            dns.resolver.default_resolver = None
+            dns.resolver.reset_default_resolver()
 
     def __generate_rndc_key(self):
         installutils.check_entropy()
@@ -1055,13 +1068,8 @@ class BindInstance(service.Service):
             cname_fqdn[cname] = fqdn
 
         # get FQDNs of all IPA masters
-        ldap = self.api.Backend.ldap2
         try:
-            entries = ldap.get_entries(
-                DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
-                   self.api.env.basedn),
-                ldap.SCOPE_ONELEVEL, None, ['cn'])
-            masters = set(e['cn'][0] for e in entries)
+            masters = set(get_masters(self.api.Backend.ldap2))
         except errors.NotFound:
             masters = set()
 
@@ -1083,6 +1091,10 @@ class BindInstance(service.Service):
         self.host = host
         self.fqdn = fqdn
         self.domain = domain_name
+
+        if not dns_zone_exists(zone, api=self.api):
+            # Zone may be a forward zone, skip update
+            return
 
         areclist = get_fwd_rr(zone, host, api=self.api)
         for rdata in areclist:
@@ -1194,18 +1206,28 @@ class BindInstance(service.Service):
 
         self.dns_backup.clear_records(self.api.Backend.ldap2.isconnected())
 
-        for f in [paths.NAMED_CONF, paths.RESOLV_CONF]:
-            try:
-                self.fstore.restore_file(f)
-            except ValueError as error:
-                logger.debug('%s', error)
+        try:
+            self.fstore.restore_file(paths.NAMED_CONF)
+        except ValueError as error:
+            logger.debug('%s', error)
 
-        # disabled by default, by ldap_enable()
+        try:
+            tasks.unconfigure_dns_resolver(fstore=self.fstore)
+        except Exception:
+            logger.exception("Failed to unconfigure DNS resolver")
+
+        installutils.rmtree(paths.BIND_LDAP_DNS_IPA_WORKDIR)
+
+        # disabled by default, by ldap_configure()
         if enabled:
             self.enable()
+        else:
+            self.disable()
 
         if running:
             self.restart()
+        else:
+            self.stop()
 
         self.named_regular.unmask()
         if named_regular_enabled:

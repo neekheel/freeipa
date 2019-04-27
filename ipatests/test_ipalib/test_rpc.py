@@ -23,13 +23,11 @@ Test the `ipalib.rpc` module.
 from __future__ import print_function
 
 import unittest
+from xmlrpc.client import Binary, Fault, dumps, loads
+import urllib
 
 import pytest
 import six
-# pylint: disable=import-error
-from six.moves.xmlrpc_client import Binary, Fault, dumps, loads
-# pylint: enable=import-error
-from six.moves import urllib
 
 from ipatests.util import raises, assert_equal, PluginTester, DummyClass
 from ipatests.util import Fuzzy
@@ -262,7 +260,7 @@ class test_xmlclient(PluginTester):
 
 @pytest.mark.skip_ipaclient_unittest
 @pytest.mark.needs_ipaapi
-class test_xml_introspection(object):
+class test_xml_introspection:
     @classmethod
     def setup_class(cls):
         try:
@@ -389,7 +387,8 @@ class test_rpcclient_context(PluginTester):
         """
         Test that session_cookie is set in `ipalib.rpc.rpcclient.connect`
         """
-        fuzzy_cookie = Fuzzy('^ipa_session=MagBearerToken=[A-Za-z0-9+\/]+=*;$')
+        fuzzy_cookie = Fuzzy(
+            r'^ipa_session=MagBearerToken=[A-Za-z0-9+\/]+=*;$')
 
         session_cookie = getattr(context, 'session_cookie', None)
         # pylint-2 is incorrectly spewing Too many positional arguments

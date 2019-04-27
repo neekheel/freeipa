@@ -31,12 +31,11 @@ import re
 import sys
 from decimal import Decimal
 from inspect import isclass
+from xmlrpc.client import MAXINT, MININT
+
 import pytest
 
 import six
-# pylint: disable=import-error
-from six.moves.xmlrpc_client import MAXINT, MININT
-# pylint: enable=import-error
 from cryptography import x509 as crypto_x509
 from cryptography.hazmat.backends import default_backend
 
@@ -173,7 +172,7 @@ def test_parse_param_spec():
     assert str(e) == TYPE_ERROR % ('spec', str, bad_value, type(bad_value))
 
 
-class DummyRule(object):
+class DummyRule:
     def __init__(self, error=None):
         assert error is None or type(error) is unicode
         self.error = error
@@ -581,7 +580,7 @@ class test_Param(ClassChecker):
         """
         Test the `ipalib.parameters.Param.get_default` method.
         """
-        class PassThrough(object):
+        class PassThrough:
             value = None
 
             def __call__(self, value):
@@ -866,7 +865,7 @@ class test_Bytes(ClassChecker):
         Test the `ipalib.parameters.Bytes._rule_pattern` method.
         """
         # Test our assumptions about Python re module and Unicode:
-        pat = b'\w+$'
+        pat = br'\w+$'
         r = re.compile(pat)
         assert r.match(b'Hello_World') is not None
         assert r.match(utf8_bytes) is None
@@ -1016,7 +1015,7 @@ class test_Str(ClassChecker):
         Test the `ipalib.parameters.Str._rule_pattern` method.
         """
         # Test our assumptions about Python re module and Unicode:
-        pat = '\w{5}$'
+        pat = r'\w{5}$'
         r1 = re.compile(pat)
         r2 = re.compile(pat, re.UNICODE)
         if six.PY2:
@@ -1156,10 +1155,10 @@ class test_StrEnum(EnumChecker):
     _cls = parameters.StrEnum
     _name = 'my_strenum'
     _datatype = unicode
-    _test_values = u'Hello', u'naughty', u'nurse!'
+    _test_values = u'Hello', u'tall', u'nurse!'
     _bad_type_values = u'Hello', 1, u'nurse!'
     _bad_type = int
-    _translation = u"values='Hello', 'naughty', 'nurse!'"
+    _translation = u"values='Hello', 'tall', 'nurse!'"
     _bad_values = u'Howdy', u'quiet', u'library!'
     _single_value_translation = u"value='Hello'"
 
@@ -1243,7 +1242,7 @@ class test_Int(ClassChecker):
         # Test with no kwargs:
         o = self.cls('my_number')
         assert o.type == int
-        assert o.allowed_types == six.integer_types
+        assert o.allowed_types == (int,)
         assert isinstance(o, parameters.Int)
         assert o.minvalue == int(MININT)
         assert o.maxvalue == int(MAXINT)

@@ -18,13 +18,14 @@
 #
 
 import collections
+import gzip
+import io
 import logging
+from urllib.parse import urlencode
 import xml.dom.minidom
+import zlib
 
 import six
-# pylint: disable=import-error
-from six.moves.urllib.parse import urlencode
-# pylint: enable=import-error
 
 # pylint: disable=ipa-forbidden-import
 from ipalib import api, errors
@@ -59,6 +60,15 @@ INCLUDED_PROFILES = {
 
 DEFAULT_PROFILE = u'caIPAserviceCert'
 KDC_PROFILE = u'KDCs_PKINIT_Certs'
+
+
+if six.PY3:
+    gzip_decompress = gzip.decompress  # pylint: disable=no-member
+else:
+    # note: gzip.decompress available in Python >= 3.2
+    def gzip_decompress(data):
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as f:
+            return f.read()
 
 
 def error_from_xml(doc, message_template):
@@ -217,7 +227,7 @@ def _httplib_request(
 
     try:
         conn = connection_factory(host, port, **connection_options)
-        conn.request(method, uri, body=request_body, headers=headers)
+        conn.request(method, path, body=request_body, headers=headers)
         res = conn.getresponse()
 
         http_status = res.status
@@ -228,8 +238,14 @@ def _httplib_request(
         logger.debug("httplib request failed:", exc_info=True)
         raise NetworkError(uri=uri, error=str(e))
 
+    encoding = res.getheader('Content-Encoding')
+    if encoding == 'gzip':
+        http_body = gzip_decompress(http_body)
+    elif encoding == 'deflate':
+        http_body = zlib.decompress(http_body)
+
     logger.debug('response status %d',    http_status)
     logger.debug('response headers %s',   http_headers)
-    logger.debug('response body %r',      http_body)
+    logger.debug('response body (decoded): %r', http_body)
 
     return http_status, http_headers, http_body

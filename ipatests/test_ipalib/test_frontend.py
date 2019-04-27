@@ -71,7 +71,7 @@ def test_is_rule():
     is_rule = frontend.is_rule
     flag = frontend.RULE_FLAG
 
-    class no_call(object):
+    class no_call:
         def __init__(self, value):
             if value is not None:
                 assert value in (True, False)
@@ -199,13 +199,15 @@ class test_Command(ClassChecker):
         """
         Return a standard subclass of `ipalib.frontend.Command`.
         """
-        class Rule(object):
+        class Rule:
             def __init__(self, name):
                 self.name = name
 
             def __call__(self, _, value):
                 if value != self.name:
                     return _('must equal %r') % self.name
+                else:
+                    return None
 
         default_from = parameters.DefaultFrom(
                 lambda arg: arg,
@@ -230,7 +232,7 @@ class test_Command(ClassChecker):
         """
         Helper method used to test args and options.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -276,7 +278,7 @@ class test_Command(ClassChecker):
         """
         Test the ``ipalib.frontend.Command.args`` instance attribute.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -333,7 +335,7 @@ class test_Command(ClassChecker):
         """
         Test the ``ipalib.frontend.Command.options`` instance attribute.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -357,7 +359,7 @@ class test_Command(ClassChecker):
         """
         Test the ``ipalib.frontend.Command.output`` instance attribute.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -405,7 +407,7 @@ class test_Command(ClassChecker):
         """
         Test the `ipalib.frontend.Command.convert` method.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -422,7 +424,7 @@ class test_Command(ClassChecker):
         """
         Test the `ipalib.frontend.Command.normalize` method.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -470,7 +472,7 @@ class test_Command(ClassChecker):
         """
         Test the `ipalib.frontend.Command.validate` method.
         """
-        class api(object):
+        class api:
             env = config.Env(context='cli')
             @staticmethod
             def is_production_mode():
@@ -689,7 +691,7 @@ class test_Command(ClassChecker):
         """
         Test the `ipalib.frontend.Command.validate_output` method.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -731,7 +733,7 @@ class test_Command(ClassChecker):
         """
         Test `ipalib.frontend.Command.validate_output` per-type validation.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -760,7 +762,7 @@ class test_Command(ClassChecker):
         """
         Test `ipalib.frontend.Command.validate_output` nested validation.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -795,7 +797,7 @@ class test_Command(ClassChecker):
         """
         Test the `ipalib.frontend.Command.get_output_params` method.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -831,7 +833,7 @@ class test_LocalOrRemote(ClassChecker):
         """
         Test the `ipalib.frontend.LocalOrRemote.__init__` method.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -914,7 +916,7 @@ class test_Object(ClassChecker):
         Test the `ipalib.frontend.Object.__init__` method.
         """
         # Setup for test:
-        class DummyAttribute(object):
+        class DummyAttribute:
             def __init__(self, obj_name, attr_name, name=None):
                 self.obj_name = obj_name
                 self.attr_name = attr_name
@@ -942,7 +944,7 @@ class test_Object(ClassChecker):
         cnt = 10
         methods_format = 'method_%d'
 
-        class FakeAPI(object):
+        class FakeAPI:
             def __init__(self):
                 self._API__plugins = get_attributes(cnt, methods_format)
                 self._API__default_map = {}
@@ -1111,13 +1113,16 @@ class test_Attribute(ClassChecker):
         Test the `ipalib.frontend.Attribute.__init__` method.
         """
         user_obj = 'The user frontend.Object instance'
-        class api(object):
+
+        class api:
             Object = {("user", "1"): user_obj}
             @staticmethod
             def is_production_mode():
                 return False
+
         class user_add(self.cls):
             pass
+
         o = user_add(api)
         assert read_only(o, 'api') is api
         assert read_only(o, 'obj') is user_obj

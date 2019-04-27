@@ -25,6 +25,8 @@
 
 # The DM password needs to be set in ~/.ipa/.dmpw
 
+from __future__ import absolute_import
+
 import os
 import sys
 import unittest
@@ -43,7 +45,7 @@ if six.PY3:
 
 @pytest.mark.tier0
 @pytest.mark.needs_ipaapi
-class test_ldap(object):
+class test_ldap:
     """
     Test various LDAP client bind methods.
     """
@@ -140,7 +142,7 @@ class test_ldap(object):
 
 @pytest.mark.tier0
 @pytest.mark.needs_ipaapi
-class test_LDAPEntry(object):
+class test_LDAPEntry:
     """
     Test the LDAPEntry class
     """
@@ -315,3 +317,21 @@ class test_LDAPEntry(object):
 
         e.raw['test'].append(b'second')
         assert e['test'] == ['not list', u'second']
+
+    def test_modlist_with_varying_encodings(self):
+        """
+        Test modlist is correct when only encoding of new value differs
+
+        See: https://bugzilla.redhat.com/show_bug.cgi?id=1658302
+        """
+        dn_ipa_encoded = b'O=Red Hat\\, Inc.'
+        dn_389ds_encoded = b'O=Red Hat\\2C Inc.'
+        entry = self.entry
+        entry.raw['distinguishedName'] = [dn_389ds_encoded]
+        # This is to make entry believe that that value was part of the
+        # original data we received from LDAP
+        entry.reset_modlist()
+        entry['distinguishedName'] = [entry['distinguishedName'][0]]
+        assert entry.generate_modlist() == [
+            (1, 'distinguishedName', [dn_389ds_encoded]),
+            (0, 'distinguishedName', [dn_ipa_encoded])]

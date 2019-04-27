@@ -20,7 +20,7 @@
 #  ->  "1.0.0"                                         #
 ########################################################
 define(IPA_VERSION_MAJOR, 4)
-define(IPA_VERSION_MINOR, 6)
+define(IPA_VERSION_MINOR, 7)
 define(IPA_VERSION_RELEASE, 90)
 
 ########################################################
@@ -31,7 +31,7 @@ define(IPA_VERSION_RELEASE, 90)
 # e.g. define(IPA_VERSION_PRE_RELEASE, rc1)            #
 #  ->  "1.0.0rc1"                                      #
 ########################################################
-define(IPA_VERSION_PRE_RELEASE, .pre1)
+define(IPA_VERSION_PRE_RELEASE, )
 
 ########################################################
 # To mark GIT snapshots this should be set to 'yes'    #
@@ -83,8 +83,8 @@ define(IPA_DATA_VERSION, 20100614120000)
 #                                                      #
 ########################################################
 define(IPA_API_VERSION_MAJOR, 2)
-define(IPA_API_VERSION_MINOR, 229)
-# Last change: Added the Certificate parameter
+define(IPA_API_VERSION_MINOR, 231)
+# Last change: Added admin creds to trust-fetch-domains
 
 
 ########################################################

@@ -43,14 +43,8 @@
 #include "ipa_krb5.h"
 #include "ipa_asn1.h"
 #include "ipa-client-common.h"
+#include "ipa_ldap.h"
 
-#define DEFAULT_CA_CERT_FILE "/etc/ipa/ca.crt"
-
-#define LDAP_SASL_EXTERNAL "EXTERNAL"
-#define LDAP_SASL_GSSAPI "GSSAPI"
-
-#define SCHEMA_LDAP "ldap://"
-#define SCHEMA_LDAPS "ldaps://"
 
 static int check_sasl_mech(const char *mech)
 {
@@ -178,42 +172,6 @@ static int ipa_server_to_uri(const char *servername, const char *mech,
     return 0;
 }
 
-static int ipa_ldap_init(LDAP **ld, const char *ldap_uri)
-{
-    int rc = 0;
-    rc = ldap_initialize(ld, ldap_uri);
-
-    return rc;
-}
-
-static int ipa_tls_ssl_init(LDAP *ld, const char *ldap_uri)
-{
-    int ret = LDAP_SUCCESS;
-    int tls_hard = LDAP_OPT_X_TLS_HARD;
-    int tls_demand = LDAP_OPT_X_TLS_DEMAND;
-
-    if (strncmp(ldap_uri, SCHEMA_LDAP, sizeof(SCHEMA_LDAP) - 1) == 0) {
-        ret = ldap_set_option(ld, LDAP_OPT_X_TLS_REQUIRE_CERT, &tls_demand);
-        if (ret != LDAP_OPT_SUCCESS) {
-            fprintf(stderr, _("Unable to set LDAP_OPT_X_TLS_REQUIRE_CERT\n"));
-            return ret;
-        }
-        ret = ldap_start_tls_s(ld, NULL, NULL);
-        if (ret != LDAP_SUCCESS) {
-            fprintf(stderr, _("Unable to initialize STARTTLS session\n"));
-            return ret;
-        }
-    } else if (strncmp(ldap_uri, SCHEMA_LDAPS, sizeof(SCHEMA_LDAPS) - 1) == 0) {
-        ret = ldap_set_option(ld, LDAP_OPT_X_TLS, &tls_hard);
-        if (ret != LDAP_OPT_SUCCESS) {
-            fprintf(stderr, _("Unable to set LDAP_OPT_X_TLS\n"));
-            return ret;
-        }
-    }
-    return ret;
-
-}
-
 static int ipa_ldap_bind(const char *ldap_uri, krb5_principal bind_princ,
                          const char *bind_dn, const char *bind_pw,
                          const char *mech, const char *ca_cert_file,
@@ -221,20 +179,12 @@ static int ipa_ldap_bind(const char *ldap_uri, krb5_principal bind_princ,
 {
     char *msg = NULL;
     struct berval bv;
-    int version;
     LDAP *ld;
     int ret;
 
     /* TODO: support referrals ? */
-    ret = ldap_set_option(NULL, LDAP_OPT_X_TLS_CACERTFILE, ca_cert_file);
-    if (ret != LDAP_OPT_SUCCESS) {
-        fprintf(stderr, _("Unable to set LDAP_OPT_X_TLS_CERTIFICATE\n"));
-        return ret;
-    }
-
     ret = ipa_ldap_init(&ld, ldap_uri);
     if (ret != LDAP_SUCCESS) {
-        fprintf(stderr, _("Unable to init connection to %s\n"), ldap_uri);
         return ret;
     }
 
@@ -243,23 +193,7 @@ static int ipa_ldap_bind(const char *ldap_uri, krb5_principal bind_princ,
         return LDAP_OPERATIONS_ERROR;
     }
 
-#ifdef LDAP_OPT_X_SASL_NOCANON
-    /* Don't do DNS canonicalization */
-    ret = ldap_set_option(ld, LDAP_OPT_X_SASL_NOCANON, LDAP_OPT_ON);
-    if (ret != LDAP_SUCCESS) {
-	fprintf(stderr, _("Unable to set LDAP_OPT_X_SASL_NOCANON\n"));
-        goto done;
-    }
-#endif
-
-    version = LDAP_VERSION3;
-    ret = ldap_set_option(ld, LDAP_OPT_PROTOCOL_VERSION, &version);
-    if (ret != LDAP_SUCCESS) {
-	fprintf(stderr, _("Unable to set LDAP_OPT_PROTOCOL_VERSION\n"));
-	goto done;
-    }
-
-    ret = ipa_tls_ssl_init(ld, ldap_uri);
+    ret = ipa_tls_ssl_init(ld, ldap_uri, ca_cert_file);
     if (ret != LDAP_OPT_SUCCESS) {
         goto done;
     }
@@ -625,7 +559,16 @@ done:
     return ret;
 }
 
-static char *ask_password(krb5_context krbctx)
+/* Prompt for either a password.
+ * This can be either asking for a new or existing password.
+ *
+ * To set a new password provide values for both prompt1 and prompt2 and
+ * set match=true to enforce that the two entered passwords match.
+ *
+ * To prompt for an existing password provide prompt1 and set match=false.
+ */
+static char *ask_password(krb5_context krbctx, char *prompt1, char *prompt2,
+                          bool match)
 {
     krb5_prompt ap_prompts[2];
     krb5_data k5d_pw0;
@@ -633,24 +576,27 @@ static char *ask_password(krb5_context krbctx)
     char pw0[256];
     char pw1[256];
     char *password;
+    int num_prompts = match ? 2:1;
 
     k5d_pw0.length = sizeof(pw0);
     k5d_pw0.data = pw0;
-    ap_prompts[0].prompt = _("New Principal Password");
+    ap_prompts[0].prompt = prompt1;
     ap_prompts[0].hidden = 1;
     ap_prompts[0].reply = &k5d_pw0;
 
-    k5d_pw1.length = sizeof(pw1);
-    k5d_pw1.data = pw1;
-    ap_prompts[1].prompt = _("Verify Principal Password");
-    ap_prompts[1].hidden = 1;
-    ap_prompts[1].reply = &k5d_pw1;
+    if (match) {
+        k5d_pw1.length = sizeof(pw1);
+        k5d_pw1.data = pw1;
+        ap_prompts[1].prompt = prompt2;
+        ap_prompts[1].hidden = 1;
+        ap_prompts[1].reply = &k5d_pw1;
+    }
 
     krb5_prompter_posix(krbctx, NULL,
                 NULL, NULL,
-                2, ap_prompts);
+                num_prompts, ap_prompts);
 
-    if (strcmp(pw0, pw1)) {
+    if (match && (strcmp(pw0, pw1))) {
         fprintf(stderr, _("Passwords do not match!"));
         return NULL;
     }
@@ -738,6 +684,56 @@ int read_ipa_config(struct ipa_config **ipacfg)
     return 0;
 }
 
+static int resolve_ktname(const char *keytab, char **ktname, char **err_msg)
+{
+	char keytab_resolved[PATH_MAX + 1];
+	struct stat st;
+	struct stat lst;
+	int ret;
+
+	*err_msg = NULL;
+
+    /* Resolve keytab symlink to support dangling symlinks, see
+     * https://pagure.io/freeipa/issue/4607. To prevent symlink attacks,
+     * the symlink is only resolved owned by the current user or by
+     * root. For simplicity, only one level if indirection is resolved.
+     */
+    if ((stat(keytab, &st) == -1) &&
+            (errno == ENOENT) &&
+            (lstat(keytab, &lst) == 0) &&
+            (S_ISLNK(lst.st_mode))) {
+        /* keytab is a dangling symlink. */
+        if (((lst.st_uid == 0) && (lst.st_gid == 0)) ||
+                ((lst.st_uid == geteuid()) && (lst.st_gid == getegid()))) {
+            /* Either root or current user owns symlink, resolve symlink and
+             * return the resolved symlink. */
+            ret = readlink(keytab, keytab_resolved, PATH_MAX + 1);
+            if ((ret == -1) || (ret > PATH_MAX)) {
+                *err_msg = _("Failed to resolve symlink to keytab.\n");
+                return ENOENT;
+            }
+            keytab_resolved[ret] = '\0';
+            ret = asprintf(ktname, "WRFILE:%s", keytab_resolved);
+            if (ret == -1) {
+                *err_msg = strerror(errno);
+                return ENOMEM;
+            }
+            return 0;
+        } else {
+            *err_msg = _("keytab is a dangling symlink and owned by another "
+                         "user.\n");
+            return EINVAL;
+        }
+    } else {
+        ret = asprintf(ktname, "WRFILE:%s", keytab);
+        if (ret == -1) {
+            *err_msg = strerror(errno);
+            return ENOMEM;
+        }
+        return 0;
+    }
+}
+
 int main(int argc, const char *argv[])
 {
 	static const char *server = NULL;
@@ -751,6 +747,7 @@ int main(int argc, const char *argv[])
 	static const char *ca_cert_file = NULL;
 	int quiet = 0;
 	int askpass = 0;
+	int askbindpw = 0;
 	int permitted_enctypes = 0;
 	int retrieve = 0;
         struct poptOption options[] = {
@@ -763,7 +760,8 @@ int main(int argc, const char *argv[])
               _("The principal to get a keytab for (ex: ftp/ftp.example.com@EXAMPLE.COM)"),
               _("Kerberos Service Principal Name") },
             { "keytab", 'k', POPT_ARG_STRING, &keytab, 0,
-              _("File were to store the keytab information"),
+              _("The keytab file to append the new key to (will be "
+                "created if it does not exist)."),
               _("Keytab File Name") },
 	    { "enctypes", 'e', POPT_ARG_STRING, &enctypes_string, 0,
               _("Encryption types to request"),
@@ -777,6 +775,8 @@ int main(int argc, const char *argv[])
               _("LDAP DN"), _("DN to bind as if not using kerberos") },
 	    { "bindpw", 'w', POPT_ARG_STRING, &bindpw, 0,
               _("LDAP password"), _("password to use if not using kerberos") },
+	    { NULL, 'W', POPT_ARG_NONE, &askbindpw, 0,
+              _("Prompt for LDAP password"), NULL },
 	    { "cacert", 0, POPT_ARG_STRING, &ca_cert_file, 0,
               _("Path to the IPA CA certificate"), _("IPA CA certificate")},
 	    { "ldapuri", 'H', POPT_ARG_STRING, &ldap_uri, 0,
@@ -848,9 +848,24 @@ int main(int argc, const char *argv[])
 		exit(2);
 	}
 
+    if (askbindpw && bindpw != NULL) {
+		fprintf(stderr, _("Bind password already provided (-w).\n"));
+		if (!quiet) {
+			poptPrintUsage(pc, stderr, 0);
+		}
+		exit(2);
+    }
+
+    if (askbindpw) {
+		bindpw = ask_password(krbctx, _("Enter LDAP password"), NULL, false);
+		if (!bindpw) {
+			exit(2);
+		}
+    }
+
 	if (NULL!=binddn && NULL==bindpw) {
 		fprintf(stderr,
-                        _("Bind password required when using a bind DN.\n"));
+                        _("Bind password required when using a bind DN (-w or -W).\n"));
 		if (!quiet)
 			poptPrintUsage(pc, stderr, 0);
 		exit(10);
@@ -914,7 +929,8 @@ int main(int argc, const char *argv[])
     }
 
         if (askpass) {
-		password = ask_password(krbctx);
+		password = ask_password(krbctx, _("New Principal Password"),
+               	                _("Verify Principal Password"), true);
 		if (!password) {
 			exit(2);
 		}
@@ -923,11 +939,6 @@ int main(int argc, const char *argv[])
 			fprintf(stderr, _("Warning: salt types are not honored"
                                 " with randomized passwords (see opt. -P)\n"));
 		}
-	}
-
-	ret = asprintf(&ktname, "WRFILE:%s", keytab);
-	if (ret == -1) {
-		exit(3);
 	}
 
 	krberr = krb5_parse_name(krbctx, principal, &sprinc);
@@ -952,6 +963,12 @@ int main(int argc, const char *argv[])
 				  "Do you have a valid Credential Cache?\n"));
 			exit(6);
 		}
+	}
+
+	ret = resolve_ktname(keytab, &ktname, &err_msg);
+	if (krberr) {
+		fprintf(stderr, "%s", err_msg);
+		exit(ret);
 	}
 
 	krberr = krb5_kt_resolve(krbctx, ktname, &kt);

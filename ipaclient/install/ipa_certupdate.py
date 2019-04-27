@@ -17,14 +17,14 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import logging
 import os
 import tempfile
 import shutil
 
-# pylint: disable=import-error
-from six.moves.urllib.parse import urlsplit
-# pylint: enable=import-error
+from urllib.parse import urlsplit
 
 from ipalib.install import certmonger, certstore, sysrestore
 from ipalib.install.kinit import kinit_keytab
@@ -70,8 +70,7 @@ def run_with_args(api):
 
     """
     server = urlsplit(api.env.jsonrpc_uri).hostname
-    ldap_uri = ipaldap.get_ldap_uri(server)
-    ldap = ipaldap.LDAPClient(ldap_uri)
+    ldap = ipaldap.LDAPClient.from_hostname_secure(server)
 
     tmpdir = tempfile.mkdtemp(prefix="tmp-")
     ccache_name = os.path.join(tmpdir, 'ccache')
@@ -162,6 +161,17 @@ def update_server(certs):
     if request_id is not None:
         timeout = api.env.startup_timeout + 60
 
+        # The dogtag-ipa-ca-renew-agent-reuse Certmonger CA never
+        # actually renews the certificate; it only pulls it from the
+        # ca_renewal LDAP cert store.
+        #
+        # Why is this needed?  If the CA cert gets renewed long
+        # before its notAfter (expiry) date (e.g. to switch from
+        # self-signed to external, or to switch to new external CA),
+        # then the other (i.e. not caRenewalMaster) CA replicas will
+        # not promptly pick up the new CA cert.  So we make
+        # ipa-certupdate always check for an updated CA cert.
+        #
         logger.debug("resubmitting certmonger request '%s'", request_id)
         certmonger.resubmit_request(
             request_id, ca='dogtag-ipa-ca-renew-agent-reuse', profile='')
@@ -184,10 +194,10 @@ def update_server(certs):
     update_file(paths.CACERT_PEM, certs)
 
 
-def update_file(filename, certs, mode=0o444):
+def update_file(filename, certs, mode=0o644):
     certs = (c[0] for c in certs if c[2] is not False)
     try:
-        x509.write_certificate_list(certs, filename)
+        x509.write_certificate_list(certs, filename, mode=mode)
     except Exception as e:
         logger.error("failed to update %s: %s", filename, e)
 

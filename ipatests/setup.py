@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 # Copyright (C) 2007  Red Hat
 # see file 'COPYING' for use and warranty information
 #
@@ -34,8 +33,8 @@ if __name__ == '__main__':
         package_dir={'ipatests': ''},
         packages=[
             "ipatests",
-            "ipatests.pytest_plugins",
-            "ipatests.pytest_plugins.integration",
+            "ipatests.pytest_ipa",
+            "ipatests.pytest_ipa.integration",
             "ipatests.test_cmdline",
             "ipatests.test_install",
             "ipatests.test_integration",
@@ -51,6 +50,7 @@ if __name__ == '__main__':
         ],
         scripts=['ipa-run-tests', 'ipa-test-config', 'ipa-test-task'],
         package_data={
+            'ipatests': ['prci_definitions/*'],
             'ipatests.test_install': ['*.update'],
             'ipatests.test_integration': ['scripts/*'],
             'ipatests.test_ipaclient': ['data/*/*/*'],
@@ -70,14 +70,13 @@ if __name__ == '__main__':
             "polib",
             "pytest",
             "pytest_multihost",
-            "python-ldap",
             "six",
         ],
         extras_require={
             "integration": ["dbus-python", "pyyaml", "ipaserver"],
             "ipaserver": ["ipaserver"],
             "webui": ["selenium", "pyyaml", "ipaserver"],
-            "xmlrpc": ["ipaserver"],
+            "xmlrpc": ["ipaserver", "python-ldap"],
             ":python_version<'3'": ["mock"],
         }
     )

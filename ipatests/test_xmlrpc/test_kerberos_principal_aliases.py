@@ -2,6 +2,8 @@
 #
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
+from __future__ import absolute_import
+
 import copy
 import ldap
 import pytest
@@ -253,7 +255,7 @@ class TestKerberosAliasExceptions(XMLRPC_test):
         # Add an alias overlapping the trusted domain realm
         with pytest.raises(errors.ValidationError):
             krbalias_user.add_principal(
-                u'{username}\@{trusted_domain}@{realm}'.format(
+                u'{username}\\@{trusted_domain}@{realm}'.format(
                     username=krbalias_user.name,
                     trusted_domain=trusted_domain['name'],
                     realm=api.env.realm
@@ -271,7 +273,7 @@ class TestKerberosAliasExceptions(XMLRPC_test):
 
         with pytest.raises(errors.ValidationError):
             krbalias_user.add_principal(
-                u'{username}\@{trusted_domain}@{realm}'.format(
+                u'{username}\\@{trusted_domain}@{realm}'.format(
                     username=krbalias_user.name,
                     trusted_domain=upn_suffix,
                     realm=api.env.realm
@@ -289,7 +291,7 @@ class TestKerberosAliasExceptions(XMLRPC_test):
 
         with pytest.raises(errors.ValidationError):
             krbalias_user.add_principal(
-                u'{username}\@{trusted_domain}@{realm}'.format(
+                u'{username}\\@{trusted_domain}@{realm}'.format(
                     username=krbalias_user.name,
                     trusted_domain=netbios_name,
                     realm=api.env.realm

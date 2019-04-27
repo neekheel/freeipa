@@ -19,11 +19,11 @@
 
 import sys
 import os
+from io import StringIO
 import shutil
 import errno
 
 import six
-from six import StringIO
 
 from ipalib import api, errors
 from ipaserver.plugins.user import user_add
@@ -37,7 +37,7 @@ pytestmark = pytest.mark.needs_ipaapi
 
 
 @pytest.mark.tier0
-class CLITestContext(object):
+class CLITestContext:
     """Context manager that replaces stdout & stderr, and catches SystemExit
 
     Whatever was printed to the streams is available in ``stdout`` and
@@ -66,6 +66,8 @@ class CLITestContext(object):
                 return False
             self.exception = exc_value
             return True
+        else:
+            return None
 
 
 def test_ipa_help():

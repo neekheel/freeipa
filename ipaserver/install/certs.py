@@ -17,6 +17,9 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
+import configparser
 import logging
 import os
 import stat
@@ -32,7 +35,6 @@ import time
 import datetime
 
 import six
-from six.moves import configparser
 
 from ipalib.install import certmonger, sysrestore
 from ipapython import dogtag
@@ -72,12 +74,19 @@ def install_pem_from_p12(p12_fname, p12_passwd, pem_fname):
                  "-passin", "file:" + pwd.name])
 
 
-def install_key_from_p12(p12_fname, p12_passwd, pem_fname):
+def install_key_from_p12(
+        p12_fname, p12_passwd, pem_fname, out_passwd_fname=None):
     pwd = ipautil.write_tmp_file(p12_passwd)
-    ipautil.run([paths.OPENSSL, "pkcs12", "-nodes", "-nocerts",
-                 "-in", p12_fname, "-out", pem_fname,
-                 "-passin", "file:" + pwd.name],
-                umask=0o077)
+    args = [
+        paths.OPENSSL, "pkcs12", "-nocerts",
+        "-in", p12_fname, "-out", pem_fname,
+        "-passin", "file:" + pwd.name]
+    if out_passwd_fname is not None:
+        args.extend(['-passout', 'file:{}'.format(out_passwd_fname)])
+    else:
+        args.append('-nodes')
+
+    ipautil.run(args, umask=0o077)
 
 
 def export_pem_p12(pkcs12_fname, pkcs12_pwd_fname, nickname, pem_fname):
@@ -127,7 +136,7 @@ def is_ipa_issued_cert(api, cert):
     return DN(cert.issuer) == cacert_subject
 
 
-class CertDB(object):
+class CertDB:
     """An IPA-server-specific wrapper around NSS
 
     This class knows IPA-specific details such as nssdir location, or the
@@ -160,12 +169,6 @@ class CertDB(object):
         self.host_name = host_name
         self.ca_subject = ca_subject
         self.subject_base = subject_base
-
-        try:
-            self.cwd = os.path.abspath(os.getcwd())
-        except OSError as e:
-            raise RuntimeError(
-                "Unable to determine the current directory: %s" % str(e))
 
         self.cacert_name = get_ca_nickname(self.realm)
 
@@ -238,10 +241,6 @@ class CertDB(object):
             shutil.rmtree(self.reqdir, ignore_errors=True)
             self.reqdir = None
         self.nssdb.close()
-        try:
-            os.chdir(self.cwd)
-        except OSError:
-            pass
 
     def setup_cert_request(self):
         """
@@ -257,10 +256,6 @@ class CertDB(object):
         self.reqdir = tempfile.mkdtemp('', 'ipa-', paths.VAR_LIB_IPA)
         self.certreq_fname = self.reqdir + "/tmpcertreq"
         self.certder_fname = self.reqdir + "/tmpcert.der"
-
-        # When certutil makes a request it creates a file in the cwd, make
-        # sure we are in a unique place when this happens
-        os.chdir(self.reqdir)
 
     def set_perms(self, fname, write=False):
         perms = stat.S_IRUSR
@@ -574,8 +569,16 @@ class CertDB(object):
         ])
 
     def create_from_cacert(self):
+        """
+        Ensure that a CA chain is in the NSS database.
+
+        If an NSS database already exists ensure that the CA chain
+        we want to load is in there and if not add it. If there is no
+        database then create an NSS database and load the CA chain.
+        """
         cacert_fname = paths.IPA_CA_CRT
-        if os.path.isfile(self.certdb_fname):
+
+        if self.nssdb.exists():
             # We already have a cert db, see if it is for the same CA.
             # If it is we leave things as they are.
             with open(cacert_fname, "r") as f:
@@ -655,14 +658,18 @@ class CertDB(object):
     def export_pem_cert(self, nickname, location):
         return self.nssdb.export_pem_cert(nickname, location)
 
-    def request_service_cert(self, nickname, principal, host):
-        certmonger.request_and_wait_for_cert(
+    def request_service_cert(self, nickname, principal, host,
+                             resubmit_timeout=None):
+        if resubmit_timeout is None:
+            resubmit_timeout = api.env.replication_wait_timeout
+        return certmonger.request_and_wait_for_cert(
             certpath=self.secdir,
             storage='NSSDB',
             nickname=nickname,
             principal=principal,
             subject=host,
-            passwd_fname=self.passwd_fname
+            passwd_fname=self.passwd_fname,
+            resubmit_timeout=resubmit_timeout
         )
 
     def is_ipa_issued_cert(self, api, nickname):
@@ -704,7 +711,7 @@ class CertDB(object):
         self.nssdb.convert_db()
 
 
-class _CrossProcessLock(object):
+class _CrossProcessLock:
     _DATETIME_FORMAT = '%Y%m%d%H%M%S%f'
 
     def __init__(self, filename):

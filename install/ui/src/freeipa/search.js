@@ -230,10 +230,8 @@ IPA.search_facet = function(spec, no_init) {
         dialog.facet = that;
         dialog.pkey_prefix = that.managed_entity_pkey_prefix();
 
-        title = text.get('@i18n:dialogs.remove_title');
-        var label = that.managed_entity.metadata.label;
-        dialog.title = title.replace('${entity}', label);
-
+        dialog.title = dialog.title ||
+                           text.get('@i18n:dialogs.remove_title_default');
         dialog.set_values(values);
 
         return dialog;
@@ -293,7 +291,8 @@ IPA.search_facet = function(spec, no_init) {
             name: that.get_search_command_name(),
             entity: that.managed_entity.name,
             method: 'find',
-            args: args
+            args: args,
+            suppress_warnings: [rpc.errors.search_result_truncated]
         });
 
         command.set_options(that.get_refresh_command_options());

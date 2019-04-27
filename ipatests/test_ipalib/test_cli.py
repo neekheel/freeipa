@@ -41,10 +41,10 @@ class test_textui(ClassChecker):
         assert str(e) == 'rows: need %r or %r; got %r' % (list, tuple, 'hello')
         rows = [
             'hello',
-            'naughty',
+            'empathetic',
             'nurse',
         ]
-        assert o.max_col_width(rows) == len('naughty')
+        assert o.max_col_width(rows) == len('empathetic')
         rows = (
             ( 'a',  'bbb',  'ccccc'),
             ('aa', 'bbbb', 'cccccc'),
@@ -76,7 +76,7 @@ def get_cmd_name(i):
     return 'cmd_%d' % i
 
 
-class DummyCommand(object):
+class DummyCommand:
     def __init__(self, name):
         self.__name = name
 
@@ -85,7 +85,7 @@ class DummyCommand(object):
     name = property(__get_name)
 
 
-class DummyAPI(object):
+class DummyAPI:
     def __init__(self, cnt):
         self.__cmd = plugable.APINameSpace(self.__cmd_iter(cnt), DummyCommand)
 

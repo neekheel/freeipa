@@ -46,10 +46,16 @@ from ipalib.base import ReadOnly, lock, islocked
 from ipalib.constants import DEFAULT_CONFIG
 from ipapython import ipa_log_manager, ipautil
 from ipapython.ipa_log_manager import (
-    log_mgr,
     LOGGING_FORMAT_FILE,
     LOGGING_FORMAT_STDERR)
 from ipapython.version import VERSION, API_VERSION, DEFAULT_PLUGINS
+
+# pylint: disable=no-name-in-module, import-error
+if six.PY3:
+    from collections.abc import Mapping
+else:
+    from collections import Mapping
+# pylint: enable=no-name-in-module, import-error
 
 if six.PY3:
     unicode = str
@@ -82,7 +88,7 @@ def find_modules_in_dir(src_dir):
         yield module
 
 
-class Registry(object):
+class Registry:
     """A decorator that makes plugins available to the API
 
     Usage::
@@ -137,7 +143,6 @@ class Plugin(ReadOnly):
         self.__finalize_called = False
         self.__finalized = False
         self.__finalize_lock = threading.RLock()
-        log_mgr.get_logger(self, True)
 
     @classmethod
     def __name_getter(cls):
@@ -223,7 +228,6 @@ class Plugin(ReadOnly):
         This method is called from `finalize()`. Subclasses can override this
         method in order to add custom finalization.
         """
-        pass
 
     def ensure_finalized(self):
         """
@@ -233,7 +237,7 @@ class Plugin(ReadOnly):
             if not self.__finalized:
                 self.finalize()
 
-    class finalize_attr(object):
+    class finalize_attr:
         """
         Create a stub object for plugin attribute that isn't set until the
         finalization of the plugin initialization.
@@ -282,7 +286,7 @@ class Plugin(ReadOnly):
         )
 
 
-class APINameSpace(collections.Mapping):
+class APINameSpace(Mapping):
     def __init__(self, api, base):
         self.__api = api
         self.__base = base
@@ -432,7 +436,6 @@ class API(ReadOnly):
         Initialize environment variables and logging.
         """
         self.__doing('bootstrap')
-        self.log = log_mgr.get_logger(self)
         self.env._bootstrap(**overrides)
         self.env._finalize_core(**dict(DEFAULT_CONFIG))
 
@@ -638,7 +641,7 @@ class API(ReadOnly):
 
         logger.debug("importing all plugin modules in %s...", package_name)
         modules = getattr(package, 'modules', find_modules_in_dir(package_dir))
-        modules = ['.'.join((package_name, name)) for name in modules]
+        modules = ['.'.join((package_name, mname)) for mname in modules]
 
         for name in modules:
             logger.debug("importing plugin module %s", name)

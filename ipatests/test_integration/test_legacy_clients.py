@@ -20,20 +20,22 @@
 # FIXME: Pylint errors
 # pylint: disable=no-member
 
+from __future__ import absolute_import
+
 import os
 import re
 import unittest
 
 from ipaplatform.paths import paths
 
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
 
 # importing test_trust under different name to avoid nose executing the test
 # base class imported from this module
 from ipatests.test_integration import test_trust as trust_tests
 
 
-class BaseTestLegacyClient(object):
+class BaseTestLegacyClient:
     """
     Tests legacy client support.
     """
@@ -88,8 +90,8 @@ class BaseTestLegacyClient(object):
         self.clear_sssd_caches()
         result = self.legacy_client.run_command(['getent', 'passwd', 'admin'])
 
-        admin_regex = "admin:\*:(\d+):(\d+):"\
-                      "Administrator:/home/admin:/bin/bash"
+        admin_regex = r"admin:\*:(\d+):(\d+):"\
+                      r"Administrator:/home/admin:/bin/bash"
 
         assert re.search(admin_regex, result.stdout_text)
 
@@ -97,7 +99,7 @@ class BaseTestLegacyClient(object):
         self.clear_sssd_caches()
         result = self.legacy_client.run_command(['getent', 'group', 'admins'])
 
-        admin_group_regex = "admins:\*:(\d+):admin"
+        admin_group_regex = r"admins:\*:(\d+):admin"
 
         assert re.search(admin_group_regex, result.stdout_text)
 
@@ -105,9 +107,9 @@ class BaseTestLegacyClient(object):
         self.clear_sssd_caches()
         result = self.legacy_client.run_command(['id', 'admin'])
 
-        uid_regex = "uid=(\d+)\(admin\)"
-        gid_regex = "gid=(\d+)\(admins\)"
-        groups_regex = "groups=(\d+)\(admins\)"
+        uid_regex = r"uid=(\d+)\(admin\)"
+        gid_regex = r"gid=(\d+)\(admins\)"
+        groups_regex = r"groups=(\d+)\(admins\)"
 
         assert re.search(uid_regex, result.stdout_text)
         assert re.search(gid_regex, result.stdout_text)
@@ -118,8 +120,8 @@ class BaseTestLegacyClient(object):
         testuser = 'testuser@%s' % self.ad.domain.name
         result = self.legacy_client.run_command(['getent', 'passwd', testuser])
 
-        testuser_regex = "testuser@%s:\*:%s:%s:"\
-                         "Test User:%s:/bin/sh"\
+        testuser_regex = r"testuser@%s:\*:%s:%s:"\
+                         r"Test User:%s:/bin/sh"\
                          % (re.escape(self.ad.domain.name),
                             self.testuser_uid_regex,
                             self.testuser_gid_regex,
@@ -135,7 +137,7 @@ class BaseTestLegacyClient(object):
         testgroup = 'testgroup@%s' % self.ad.domain.name
         result = self.legacy_client.run_command(['getent', 'group', testgroup])
 
-        testgroup_regex = "%s:\*:%s:" % (testgroup, self.testuser_gid_regex)
+        testgroup_regex = r"%s:\*:%s:" % (testgroup, self.testuser_gid_regex)
         assert re.search(testgroup_regex, result.stdout_text)
 
     def test_id_ad_user(self):
@@ -237,9 +239,9 @@ class BaseTestLegacyClient(object):
         testuser = 'subdomaintestuser@%s' % self.ad_subdomain
         result = self.legacy_client.run_command(['getent', 'passwd', testuser])
 
-        testuser_regex = "subdomaintestuser@%s:\*:%s:%s:"\
-                         "Subdomaintest User:%s:"\
-                         "/bin/sh"\
+        testuser_regex = r"subdomaintestuser@%s:\*:%s:%s:"\
+                         r"Subdomaintest User:%s:"\
+                         r"/bin/sh"\
                          % (re.escape(self.ad_subdomain),
                             self.subdomain_testuser_uid_regex,
                             self.subdomain_testuser_gid_regex,
@@ -258,7 +260,7 @@ class BaseTestLegacyClient(object):
         testgroup = 'subdomaintestgroup@%s' % self.ad_subdomain
         result = self.legacy_client.run_command(['getent', 'group', testgroup])
 
-        testgroup_stdout = "%s:\*:%s:" % (testgroup,
+        testgroup_stdout = r"%s:\*:%s:" % (testgroup,
                                           self.subdomain_testuser_gid_regex)
         assert re.search(testgroup_stdout, result.stdout_text)
 
@@ -336,8 +338,8 @@ class BaseTestLegacyClient(object):
         testuser = 'treetestuser@{0}'.format(self.ad_treedomain)
         result = self.legacy_client.run_command(['getent', 'passwd', testuser])
 
-        testuser_regex = ("treetestuser@{0}:\*:{1}:{2}:TreeTest User:"
-                          "/home/{0}/treetestuser:/bin/sh".format(
+        testuser_regex = (r"treetestuser@{0}:\*:{1}:{2}:TreeTest User:"
+                          r"/home/{0}/treetestuser:/bin/sh".format(
                               re.escape(self.ad_treedomain),
                               self.treedomain_testuser_uid_regex,
                               self.treedomain_testuser_gid_regex))
@@ -352,7 +354,7 @@ class BaseTestLegacyClient(object):
         testgroup = 'treetestgroup@{0}'.format(self.ad_treedomain)
         result = self.legacy_client.run_command(['getent', 'group', testgroup])
 
-        testgroup_stdout = "{0}:\*:{1}:".format(
+        testgroup_stdout = r"{0}:\*:{1}:".format(
                            testgroup, self.treedomain_testuser_gid_regex)
 
         assert re.search(testgroup_stdout, result.stdout_text)
@@ -468,14 +470,14 @@ class BaseTestLegacyClient(object):
 
 # Base classes with attributes that are specific for each legacy client test
 
-class BaseTestLegacySSSDBefore19RedHat(object):
+class BaseTestLegacySSSDBefore19RedHat:
 
     advice_id = 'config-redhat-sssd-before-1-9'
     required_extra_roles = ['legacy_client_sssd_redhat']
     optional_extra_roles = ['ad_subdomain', 'ad_treedomain']
 
 
-class BaseTestLegacyNssPamLdapdRedHat(object):
+class BaseTestLegacyNssPamLdapdRedHat:
 
     advice_id = 'config-redhat-nss-pam-ldapd'
     required_extra_roles = ['legacy_client_nss_pam_ldapd_redhat']
@@ -485,7 +487,7 @@ class BaseTestLegacyNssPamLdapdRedHat(object):
         tasks.clear_sssd_cache(self.master)
 
 
-class BaseTestLegacyNssLdapRedHat(object):
+class BaseTestLegacyNssLdapRedHat:
 
     advice_id = 'config-redhat-nss-ldap'
     required_extra_roles = ['legacy_client_nss_ldap_redhat']
@@ -516,18 +518,18 @@ class BaseTestLegacyClientPosix(BaseTestLegacyClient,
 class BaseTestLegacyClientNonPosix(BaseTestLegacyClient,
                                    trust_tests.TestBasicADTrust):
 
-    testuser_uid_regex = '(?!10042)(\d+)'
-    testuser_gid_regex = '(?!10047)(\d+)'
-    subdomain_testuser_uid_regex = '(?!10142)(\d+)'
-    subdomain_testuser_gid_regex = '(?!10147)(\d+)'
-    treedomain_testuser_uid_regex = '(?!10242)(\d+)'
-    treedomain_testuser_gid_regex = '(?!10247)(\d+)'
+    testuser_uid_regex = r'(?!10042)(\d+)'
+    testuser_gid_regex = r'(?!10047)(\d+)'
+    subdomain_testuser_uid_regex = r'(?!10142)(\d+)'
+    subdomain_testuser_gid_regex = r'(?!10147)(\d+)'
+    treedomain_testuser_uid_regex = r'(?!10242)(\d+)'
+    treedomain_testuser_gid_regex = r'(?!10247)(\d+)'
 
     def test_remove_nonposix_trust(self):
         pass
 
 
-class BaseTestSSSDMixin(object):
+class BaseTestSSSDMixin:
 
     def test_apply_advice(self):
         super(BaseTestSSSDMixin, self).test_apply_advice()

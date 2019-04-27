@@ -20,7 +20,7 @@
 import pytest
 
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.pytest_plugins.integration.tasks import (
+from ipatests.pytest_ipa.integration.tasks import (
     clear_sssd_cache, get_host_ip_with_hostmask, modify_sssd_conf)
 
 
@@ -80,6 +80,11 @@ class TestSudo(IntegrationTest):
                                 'defaults',
                                 '--sudooption', "!authenticate"])
 
+        # Create test user -- member of group admins
+        cls.master.run_command(['ipa', 'user-add', 'admin2',
+                                '--first', 'Admin', '--last', 'Second'])
+        cls.master.run_command(['ipa', 'group-add-member', 'admins',
+                                '--users', 'admin2'])
 
     @classmethod
     def uninstall(cls, mh):
@@ -117,14 +122,42 @@ class TestSudo(IntegrationTest):
 
         return result
 
+    # testcases test_admins_group_does_not_have_sudo_permission and
+    # test_advise_script_enable_sudo_admins must be run before any other sudo
+    # rules are applied
+    def test_admins_group_does_not_have_sudo_permission(self):
+        result = self.list_sudo_commands('admin2', raiseonerr=False)
+        assert result.returncode == 1
+        assert "Sorry, user admin2 may not run sudo on {}.".format(
+            self.clientname) in result.stderr_text
+
+    def test_advise_script_enable_sudo_admins(self):
+        """
+            Test for advise scipt to add sudo permissions for admin users
+            https://pagure.io/freeipa/issue/7538
+        """
+        result = self.master.run_command('ipa-advise enable_admins_sudo')
+        script = result.stdout_text
+        self.master.run_command('bash', stdin_text=script)
+        try:
+            result = self.list_sudo_commands('admin2')
+            assert '(root) ALL' in result.stdout_text
+        finally:
+            result1 = self.master.run_command(
+                ['ipa', 'sudorule-del', 'admins_all'], raiseonerr=False)
+            result2 = self.master.run_command(
+                ['ipa', 'hbacrule-del', 'admins_sudo'], raiseonerr=False)
+            assert result1.returncode == 0 and result2.returncode == 0,\
+                'rules cleanup failed'
+
     def test_nisdomainname(self):
         result = self.client.run_command('nisdomainname')
         assert self.client.domain.name in result.stdout_text
 
     def test_add_sudo_commands(self):
         # Group: Readers
-        self.master.run_command(['ipa', 'sudocmd-add', '/usr/bin/cat'])
-        self.master.run_command(['ipa', 'sudocmd-add', '/usr/bin/tail'])
+        self.master.run_command(['ipa', 'sudocmd-add', '/bin/cat'])
+        self.master.run_command(['ipa', 'sudocmd-add', '/bin/tail'])
 
         # No group
         self.master.run_command(['ipa', 'sudocmd-add', '/usr/bin/yum'])
@@ -134,10 +167,10 @@ class TestSudo(IntegrationTest):
                                  '--desc', '"Applications that read"'])
 
         self.master.run_command(['ipa', 'sudocmdgroup-add-member', 'readers',
-                                 '--sudocmds', '/usr/bin/cat'])
+                                 '--sudocmds', '/bin/cat'])
 
         self.master.run_command(['ipa', 'sudocmdgroup-add-member', 'readers',
-                                 '--sudocmds', '/usr/bin/tail'])
+                                 '--sudocmds', '/bin/tail'])
 
     def test_create_allow_all_rule(self):
         # Create rule that allows everything
@@ -408,8 +441,8 @@ class TestSudo(IntegrationTest):
         result1 = self.list_sudo_commands("testuser1")
         assert "(ALL : ALL) NOPASSWD:" in result1.stdout_text
         assert "/usr/bin/yum" in result1.stdout_text
-        assert "/usr/bin/tail" in result1.stdout_text
-        assert "/usr/bin/cat" in result1.stdout_text
+        assert "/bin/tail" in result1.stdout_text
+        assert "/bin/cat" in result1.stdout_text
 
     def test_setting_category_to_all_with_valid_entries_command(self):
         result = self.reset_rule_categories(safe_delete=False)

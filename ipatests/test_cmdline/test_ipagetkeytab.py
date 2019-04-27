@@ -20,6 +20,8 @@
 Test `ipa-getkeytab`
 """
 
+from __future__ import absolute_import
+
 import os
 import shutil
 import tempfile
@@ -187,6 +189,23 @@ class test_ipagetkeytab(KeytabRetrievalTest):
             use_keytab(test_service.name, self.keytabname)
         except Exception as errmsg:
             assert('Unable to bind to LDAP. Error initializing principal' in str(errmsg))
+
+    def test_dangling_symlink(self, test_service):
+        # see https://pagure.io/freeipa/issue/4607
+        test_service.ensure_exists()
+
+        fd, symlink_target = tempfile.mkstemp()
+        os.close(fd)
+        os.unlink(symlink_target)
+        # create dangling symlink
+        os.symlink(self.keytabname, symlink_target)
+
+        try:
+            self.assert_success(test_service.name, raiseonerr=True)
+            assert os.path.isfile(symlink_target)
+            assert os.path.samefile(self.keytabname, symlink_target)
+        finally:
+            os.unlink(symlink_target)
 
 
 class TestBindMethods(KeytabRetrievalTest):

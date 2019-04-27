@@ -20,19 +20,20 @@ import getpass
 import gssapi
 import netifaces
 import os
+import re
 import SSSDConfig
+import shutil
 import socket
 import sys
 import tempfile
 import time
 import traceback
 
-# pylint: disable=import-error
-from six.moves.configparser import RawConfigParser
-from six.moves.urllib.parse import urlparse, urlunparse
-# pylint: enable=import-error
+from configparser import RawConfigParser
+from urllib.parse import urlparse, urlunparse
 
 from ipalib import api, errors, x509
+from ipalib.constants import IPAAPI_USER
 from ipalib.install import certmonger, certstore, service, sysrestore
 from ipalib.install import hostname as hostname_
 from ipalib.install.kinit import kinit_keytab, kinit_password
@@ -44,6 +45,7 @@ from ipalib.util import (
     verify_host_resolvable,
 )
 from ipaplatform import services
+from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipaplatform.tasks import tasks
 from ipapython import certdb, kernel_keyring, ipaldap, ipautil
@@ -59,8 +61,10 @@ from ipapython.ipautil import (
     user_input,
 )
 from ipapython.ssh import SSHPublicKey
+from ipapython import version
 
-from . import automount, ipadiscovery, ntpconf, sssd
+from . import automount, timeconf, sssd
+from ipaclient import discovery
 from .ipachangeconf import IPAChangeConf
 
 NoneType = type(None)
@@ -198,6 +202,31 @@ def nssldap_exists():
                 pass
 
     return (retval, files_found)
+
+
+def check_ldap_conf(conf=paths.OPENLDAP_LDAP_CONF,
+                    error_rval=CLIENT_INSTALL_ERROR):
+    if not os.path.isfile(conf):
+        return False
+
+    pat = re.compile(r"^\s*(PORT|HOST).*")
+    unsupported = set()
+
+    with open(conf) as f:
+        for line in f:
+            mo = pat.match(line)
+            if mo is not None:
+                unsupported.add(mo.group(1))
+
+    if unsupported:
+        raise ScriptError(
+            "'{}' contains deprecated and unsupported entries: {}".format(
+                conf, ", ".join(sorted(unsupported))
+            ),
+            rval=error_rval
+        )
+    else:
+        return True
 
 
 def delete_ipa_domain():
@@ -522,19 +551,24 @@ def configure_openldap_conf(fstore, cli_basedn, cli_server):
         {
             'name': 'comment',
             'type': 'comment',
-            'value': '   URI, BASE and TLS_CACERT have been added if they '
-                     'were not set.'
+            'value': '   URI, BASE, TLS_CACERT and SASL_MECH'
         },
         {
             'name': 'comment',
             'type': 'comment',
-            'value': '   In case any of them were set, a comment with '
-                     'trailing note'
+            'value': '   have been added if they were not set.'
         },
         {
             'name': 'comment',
             'type': 'comment',
-            'value': '   "# modified by IPA" note has been inserted.'
+            'value': '   In case any of them were set, a comment has been '
+                     'inserted and'
+        },
+        {
+            'name': 'comment',
+            'type': 'comment',
+            'value': '   "# CONF_NAME modified by IPA" added to the line '
+                     'above.'
         },
         {
             'name': 'comment',
@@ -572,6 +606,12 @@ def configure_openldap_conf(fstore, cli_basedn, cli_server):
             'name': 'TLS_CACERT',
             'type': 'option',
             'value': paths.IPA_CA_CRT
+        },
+        {
+            'action': 'addifnotset',
+            'name': 'SASL_MECH',
+            'type': 'option',
+            'value': 'GSSAPI'
         },
     ]
 
@@ -627,6 +667,16 @@ def configure_krb5_conf(
         filename, client_domain, client_hostname, force=False,
         configure_sssd=True):
 
+    # First, write a snippet to krb5.conf.d.  Currently this doesn't support
+    # templating, but that could be changed in the future.
+    template = os.path.join(
+        paths.USR_SHARE_IPA_CLIENT_DIR,
+        os.path.basename(paths.KRB5_FREEIPA) + ".template"
+    )
+    shutil.copy(template, paths.KRB5_FREEIPA)
+    os.chmod(paths.KRB5_FREEIPA, 0o644)
+
+    # Then, perform the rest of our configuration into krb5.conf itself.
     krbconf = IPAChangeConf("IPA Installer")
     krbconf.setOptionAssignment((" = ", " "))
     krbconf.setSectionNameDelimiters(("[", "]"))
@@ -775,6 +825,7 @@ def configure_certmonger(
     cmonger = services.knownservices.certmonger
     try:
         cmonger.enable()
+        cmonger.start()
     except Exception as e:
         logger.error(
             "Failed to configure automatic startup of the %s daemon: %s",
@@ -786,19 +837,24 @@ def configure_certmonger(
     subject = str(DN(('CN', hostname), subject_base))
     passwd_fname = os.path.join(paths.IPA_NSSDB_DIR, 'pwdfile.txt')
     try:
-        certmonger.request_cert(
+        certmonger.request_and_wait_for_cert(
             certpath=paths.IPA_NSSDB_DIR,
             storage='NSSDB',
             nickname='Local IPA host',
             subject=subject,
             dns=[hostname],
             principal=principal,
-            passwd_fname=passwd_fname
+            passwd_fname=passwd_fname,
+            resubmit_timeout=120,
         )
-    except Exception as ex:
-        logger.error(
-            "%s request for host certificate failed: %s",
-            cmonger.service_name, ex)
+    except Exception as e:
+        logger.exception("certmonger request failed")
+        raise ScriptError(
+            "{} request for host certificate failed: {}".format(
+                cmonger.service_name, e
+            ),
+            rval=CLIENT_INSTALL_ERROR
+        )
 
 
 def configure_sssd_conf(
@@ -840,7 +896,7 @@ def configure_sssd_conf(
             logger.info(
                 "The old /etc/sssd/sssd.conf is backed up and "
                 "will be restored during uninstall.")
-        logger.info("New SSSD config will be created")
+        logger.debug("New SSSD config will be created")
         sssdconfig = SSSDConfig.SSSDConfig()
         sssdconfig.new_config()
 
@@ -859,7 +915,7 @@ def configure_sssd_conf(
         domain = sssdconfig.new_domain(cli_domain)
 
     if options.on_master:
-        sssd_enable_service(sssdconfig, 'ifp')
+        sssd_enable_ifp(sssdconfig)
 
     if (
         (options.conf_ssh and os.path.isfile(paths.SSH_CONFIG)) or
@@ -963,21 +1019,54 @@ def configure_sssd_conf(
     return 0
 
 
-def sssd_enable_service(sssdconfig, service):
+def sssd_enable_service(sssdconfig, name):
     try:
-        sssdconfig.new_service(service)
+        sssdconfig.new_service(name)
     except SSSDConfig.ServiceAlreadyExists:
         pass
     except SSSDConfig.ServiceNotRecognizedError:
         logger.error(
-            "Unable to activate the %s service in SSSD config.", service)
+            "Unable to activate the '%s' service in SSSD config.", name)
         logger.info(
             "Please make sure you have SSSD built with %s support "
-            "installed.", service)
+            "installed.", name)
         logger.info(
-            "Configure %s support manually in /etc/sssd/sssd.conf.", service)
+            "Configure %s support manually in /etc/sssd/sssd.conf.", name)
+        return None
 
-    sssdconfig.activate_service(service)
+    sssdconfig.activate_service(name)
+    return sssdconfig.get_service(name)
+
+
+def sssd_enable_ifp(sssdconfig, allow_httpd=False):
+    """Enable and configure libsss_simpleifp plugin
+
+    Allow the ``ipaapi`` user to access IFP. In case allow_httpd is true,
+    the Apache HTTPd user is also allowed to access IFP. For smart card
+    authentication, mod_lookup_identity must be allowed to access user
+    information.
+    """
+    service = sssd_enable_service(sssdconfig, 'ifp')
+    if service is None:
+        # unrecognized service
+        return
+
+    try:
+        uids = service.get_option('allowed_uids')
+    except SSSDConfig.NoOptionError:
+        uids = set()
+    else:
+        uids = {s.strip() for s in uids.split(',') if s.strip()}
+    # SSSD supports numeric and string UIDs
+    # ensure that root is allowed to access IFP, might be 0 or root
+    if uids.isdisjoint({'0', 'root'}):
+        uids.add('root')
+    # allow IPA API to access IFP
+    uids.add(IPAAPI_USER)
+    if allow_httpd:
+        uids.add(constants.HTTPD_USER)
+    service.set_option('allowed_uids', ', '.join(sorted(uids)))
+    sssdconfig.save_service(service)
 
 
 def change_ssh_config(filename, changes, sections):
@@ -1225,10 +1314,9 @@ def do_nsupdate(update_txt):
     logger.debug("Writing nsupdate commands to %s:", UPDATE_FILE)
     logger.debug("%s", update_txt)
 
-    update_fd = open(UPDATE_FILE, "w")
-    update_fd.write(update_txt)
-    update_fd.flush()
-    update_fd.close()
+    with open(UPDATE_FILE, "w") as f:
+        f.write(update_txt)
+        ipautil.flush_sync(f)
 
     result = False
     try:
@@ -1550,8 +1638,7 @@ def cert_summary(msg, certs, indent='    '):
 
 
 def get_certs_from_ldap(server, base_dn, realm, ca_enabled):
-    ldap_uri = ipaldap.get_ldap_uri(server)
-    conn = ipaldap.LDAPClient(ldap_uri, sasl_nocanon=True)
+    conn = ipaldap.LDAPClient.from_hostname_plain(server)
     try:
         conn.gssapi_bind()
         certs = certstore.get_ca_certs(conn, base_dn, realm, ca_enabled)
@@ -1831,7 +1918,7 @@ def get_ca_certs(fstore, options, server, basedn, realm):
 
     if ca_certs is not None:
         try:
-            x509.write_certificate_list(ca_certs, ca_file)
+            x509.write_certificate_list(ca_certs, ca_file, mode=0o644)
         except Exception as e:
             if os.path.exists(ca_file):
                 try:
@@ -1968,6 +2055,10 @@ def install_check(options):
     global client_domain
     global cli_basedn
 
+    print("This program will set up FreeIPA client.")
+    print("Version {}".format(version.VERSION))
+    print("")
+
     cli_domain_source = 'Unknown source'
     cli_server_source = 'Unknown source'
 
@@ -1987,21 +2078,17 @@ def install_check(options):
             "using 'ipa-client-install --uninstall'.")
         raise ScriptError(rval=CLIENT_ALREADY_CONFIGURED)
 
-    if options.conf_ntp and not options.on_master and not options.force_ntpd:
-        try:
-            ntpconf.check_timedate_services()
-        except ntpconf.NTPConflictingService as e:
-            print("WARNING: ntpd time&date synchronization service will not"
-                  " be configured as")
-            print("conflicting service ({}) is enabled".format(
-                e.conflicting_service))
-            print("Use --force-ntpd option to disable it and force "
-                  "configuration of ntpd")
-            print("")
+    check_ldap_conf()
 
-            # configuration of ntpd is disabled in this case
-            options.conf_ntp = False
-        except ntpconf.NTPConfigurationError:
+    if options.conf_ntp:
+        try:
+            timeconf.check_timedate_services()
+        except timeconf.NTPConflictingService as e:
+            print("WARNING: conflicting time&date synchronization service '{}'"
+                  " will be disabled".format(e.conflicting_service))
+            print("in favor of chronyd")
+            print("")
+        except timeconf.NTPConfigurationError:
             pass
 
     if options.unattended and (
@@ -2027,9 +2114,25 @@ def install_check(options):
             rval=CLIENT_INSTALL_ERROR
         )
 
-    if (hostname == 'localhost') or (hostname == 'localhost.localdomain'):
+    if hostname in ('localhost', 'localhost.localdomain'):
         raise ScriptError(
             "Invalid hostname, '{}' must not be used.".format(hostname),
+            rval=CLIENT_INSTALL_ERROR)
+
+    # --no-sssd is not supported any more for rhel-based distros
+    if not tasks.is_nosssd_supported() and not options.sssd:
+        raise ScriptError(
+            "Option '--no-sssd' is incompatible with the 'authselect' tool "
+            "provided by this distribution for configuring system "
+            "authentication resources",
+            rval=CLIENT_INSTALL_ERROR)
+
+    # --noac is not supported any more for rhel-based distros
+    if not tasks.is_nosssd_supported() and options.no_ac:
+        raise ScriptError(
+            "Option '--noac' is incompatible with the 'authselect' tool "
+            "provided by this distribution for configuring system "
+            "authentication resources",
             rval=CLIENT_INSTALL_ERROR)
 
     # when installing with '--no-sssd' option, check whether nss-ldap is
@@ -2056,6 +2159,16 @@ def install_check(options):
         logger.warning("Option 'force-join' has no additional effect "
                        "when used with together with option 'keytab'.")
 
+    # Remove invalid keytab file
+    try:
+        gssapi.Credentials(
+            store={'keytab': paths.KRB5_KEYTAB},
+            usage='accept',
+        )
+    except gssapi.exceptions.GSSError:
+        logger.debug("Deleting invalid keytab: '%s'.", paths.KRB5_KEYTAB)
+        remove_file(paths.KRB5_KEYTAB)
+
     # Check if old certificate exist and show warning
     if (
         not options.ca_cert_file and
@@ -2067,7 +2180,7 @@ def install_check(options):
         raise ScriptError(rval=CLIENT_INSTALL_ERROR)
 
     # Create the discovery instance
-    ds = ipadiscovery.IPADiscovery()
+    ds = discovery.IPADiscovery()
 
     ret = ds.search(
         domain=options.domain,
@@ -2090,22 +2203,22 @@ def install_check(options):
         print_port_conf_info()
         raise ScriptError(rval=CLIENT_INSTALL_ERROR)
 
-    if ret == ipadiscovery.BAD_HOST_CONFIG:
+    if ret == discovery.BAD_HOST_CONFIG:
         logger.error("Can't get the fully qualified name of this host")
         logger.info("Check that the client is properly configured")
         raise ScriptError(rval=CLIENT_INSTALL_ERROR)
-    if ret == ipadiscovery.NOT_FQDN:
+    if ret == discovery.NOT_FQDN:
         raise ScriptError(
             "{} is not a fully-qualified hostname".format(hostname),
             rval=CLIENT_INSTALL_ERROR)
-    if ret in (ipadiscovery.NO_LDAP_SERVER, ipadiscovery.NOT_IPA_SERVER) \
+    if ret in (discovery.NO_LDAP_SERVER, discovery.NOT_IPA_SERVER) \
             or not ds.domain:
-        if ret == ipadiscovery.NO_LDAP_SERVER:
+        if ret == discovery.NO_LDAP_SERVER:
             if ds.server:
                 logger.debug("%s is not an LDAP server", ds.server)
             else:
                 logger.debug("No LDAP server found")
-        elif ret == ipadiscovery.NOT_IPA_SERVER:
+        elif ret == discovery.NOT_IPA_SERVER:
             if ds.server:
                 logger.debug("%s is not an IPA server", ds.server)
             else:
@@ -2142,7 +2255,7 @@ def install_check(options):
 
     client_domain = hostname[hostname.find(".")+1:]
 
-    if ret in (ipadiscovery.NO_LDAP_SERVER, ipadiscovery.NOT_IPA_SERVER) \
+    if ret in (discovery.NO_LDAP_SERVER, discovery.NOT_IPA_SERVER) \
             or not ds.server:
         logger.debug("IPA Server not found")
         if options.server:
@@ -2194,13 +2307,13 @@ def install_check(options):
             cli_server_source = ds.server_source
             logger.debug("will use discovered server: %s", cli_server[0])
 
-    if ret == ipadiscovery.NOT_IPA_SERVER:
+    if ret == discovery.NOT_IPA_SERVER:
         logger.error("%s is not an IPA v2 Server.", cli_server[0])
         print_port_conf_info()
         logger.debug("(%s: %s)", cli_server[0], cli_server_source)
         raise ScriptError(rval=CLIENT_INSTALL_ERROR)
 
-    if ret == ipadiscovery.NO_ACCESS_TO_LDAP:
+    if ret == discovery.NO_ACCESS_TO_LDAP:
         logger.warning("Anonymous access to the LDAP server is disabled.")
         logger.info("Proceeding without strict verification.")
         logger.info(
@@ -2208,7 +2321,7 @@ def install_check(options):
             "has been explicitly restricted.")
         ret = 0
 
-    if ret == ipadiscovery.NO_TLS_LDAP:
+    if ret == discovery.NO_TLS_LDAP:
         logger.warning(
             "The LDAP server requires TLS is but we do not have the CA.")
         logger.info("Proceeding without strict verification.")
@@ -2345,6 +2458,70 @@ def update_ipa_nssdb():
                                    (nickname, sys_db.secdir, e))
 
 
+def sync_time(options, fstore, statestore):
+    """
+    Will disable any other time synchronization service and configure chrony
+    with given ntp(chrony) server and/or pool using Augeas.
+    If there is no option --ntp-server set IPADiscovery will try to find ntp
+    server in DNS records.
+    """
+    # We assume that NTP servers are discoverable through SRV records in DNS.
+
+    # disable other time&date services first
+    timeconf.force_chrony(statestore)
+
+    if not options.ntp_servers and not options.ntp_pool:
+        ds = discovery.IPADiscovery()
+        ntp_servers = ds.ipadns_search_srv(cli_domain, '_ntp._udp',
+                                           None, break_on_first=False)
+        if not ntp_servers and not options.unattended:
+            options.ntp_servers, options.ntp_pool = timeconf.get_time_source()
+        else:
+            options.ntp_servers = ntp_servers
+
+    logger.info('Synchronizing time')
+
+    configured = False
+    if options.ntp_servers or options.ntp_pool:
+        configured = timeconf.configure_chrony(options.ntp_servers,
+                                               options.ntp_pool,
+                                               fstore, statestore)
+    else:
+        logger.warning("No SRV records of NTP servers found and no NTP server "
+                       "or pool address was provided.")
+
+    if not configured:
+        print("Using default chrony configuration.")
+
+    return timeconf.sync_chrony()
+
+
+def restore_time_sync(statestore, fstore):
+    if statestore.has_state('chrony'):
+        chrony_enabled = statestore.restore_state('chrony', 'enabled')
+        restored = False
+
+        try:
+            # Restore might fail due to missing file(s) in backup.
+            # One example is if the client was updated from a previous version
+            # not configured with chrony. In such a cast it is OK to fail.
+            restored = fstore.restore_file(paths.CHRONY_CONF)
+        except ValueError:  # this will not handle possivble IOError
+            logger.debug("Configuration file %s was not restored.",
+                         paths.CHRONY_CONF)
+
+        if not chrony_enabled:
+            services.knownservices.chronyd.stop()
+            services.knownservices.chronyd.disable()
+        elif restored:
+            services.knownservices.chronyd.restart()
+
+    try:
+        timeconf.restore_forced_timeservices(statestore)
+    except CalledProcessError as e:
+        logger.error('Failed to restore time synchronization service: %s', e)
+
+
 def install(options):
     try:
         _install(options)
@@ -2390,39 +2567,16 @@ def _install(options):
         tasks.backup_hostname(fstore, statestore)
         tasks.set_hostname(options.hostname)
 
-    ntp_srv_servers = []
-    if not options.on_master and options.conf_ntp:
-        # Attempt to sync time with IPA server.
-        # If we're skipping NTP configuration, we also skip the time sync here.
-        # We assume that NTP servers are discoverable through SRV records
-        # in the DNS.
-        # If that fails, we try to sync directly with IPA server,
-        # assuming it runs NTP
-        logger.info('Synchronizing time with KDC...')
-        ds = ipadiscovery.IPADiscovery()
-        ntp_srv_servers = ds.ipadns_search_srv(cli_domain, '_ntp._udp',
-                                               None, break_on_first=False)
-        synced_ntp = False
-        ntp_servers = ntp_srv_servers
-
-        # use user specified NTP servers if there are any
-        if options.ntp_servers:
-            ntp_servers = options.ntp_servers
-
-        for s in ntp_servers:
-            synced_ntp = ntpconf.synconce_ntp(s, options.debug)
-            if synced_ntp:
-                break
-
-        if not synced_ntp and not options.ntp_servers:
-            synced_ntp = ntpconf.synconce_ntp(cli_server[0], options.debug)
-        if not synced_ntp:
-            logger.warning(
-                "Unable to sync time with NTP "
-                "server, assuming the time is in sync. Please check "
-                "that 123 UDP port is opened.")
+    if options.conf_ntp:
+        # Attempt to configure and sync time with NTP server (chrony).
+        sync_time(options, fstore, statestore)
+    elif options.on_master:
+        # If we're on master skipping the time sync here because it was done
+        # in ipa-server-install
+        logger.debug("Skipping attempt to configure and synchronize time with"
+                     " chrony server as it has been already done on master.")
     else:
-        logger.info('Skipping synchronizing time with NTP server.')
+        logger.info("Skipping chrony configuration")
 
     if not options.unattended:
         if (options.principal is None and options.password is None and
@@ -2575,13 +2729,6 @@ def _install(options):
                     "principal for this server.")
             else:
                 logger.info("Enrolled in IPA realm %s", cli_realm)
-
-            start = stderr.find('Certificate subject base is: ')
-            if start >= 0:
-                start = start + 29
-                subject_base = stderr[start:]
-                subject_base = subject_base.strip()
-                subject_base = DN(subject_base)
 
             if options.principal is not None:
                 run([paths.KDESTROY], raiseonerr=False, env=env)
@@ -2748,6 +2895,20 @@ def _install(options):
     if not ca_enabled:
         disable_ra()
 
+    try:
+        result = api.Backend.rpcclient.forward(
+            'config_show',
+            raw=True,  # so that servroles are not queried
+            version=u'2.0'
+        )
+    except Exception as e:
+        logger.debug("config_show failed %s", e, exc_info=True)
+        raise ScriptError(
+            "Failed to retrieve CA certificate subject base: {}".format(e),
+            rval=CLIENT_INSTALL_ERROR)
+    else:
+        subject_base = DN(result['result']['ipacertificatesubjectbase'][0])
+
     # Create IPA NSS database
     try:
         create_ipa_nssdb()
@@ -2772,10 +2933,14 @@ def _install(options):
 
     x509.write_certificate_list(
         [c for c, n, t, u in ca_certs if t is not False],
-        paths.KDC_CA_BUNDLE_PEM)
+        paths.KDC_CA_BUNDLE_PEM,
+        mode=0o644
+    )
     x509.write_certificate_list(
         [c for c, n, t, u in ca_certs if t is not False],
-        paths.CA_BUNDLE_PEM)
+        paths.CA_BUNDLE_PEM,
+        mode=0o644
+    )
 
     # Add the CA certificates to the IPA NSS database
     logger.debug("Adding CA certificates to the IPA NSS database.")
@@ -2857,9 +3022,26 @@ def _install(options):
 
     if not options.no_ac:
         # Modify nsswitch/pam stack
-        tasks.modify_nsswitch_pam_stack(sssd=options.sssd,
-                                        mkhomedir=options.mkhomedir,
-                                        statestore=statestore)
+        tasks.modify_nsswitch_pam_stack(
+            sssd=options.sssd,
+            mkhomedir=options.mkhomedir,
+            statestore=statestore,
+            sudo=options.conf_sudo
+        )
+        # if mkhomedir, make sure oddjobd is enabled and started
+        if options.mkhomedir:
+            oddjobd = services.service('oddjobd', api)
+            running = oddjobd.is_running()
+            enabled = oddjobd.is_enabled()
+            statestore.backup_state('oddjobd', 'running', running)
+            statestore.backup_state('oddjobd', 'enabled', enabled)
+            try:
+                if not enabled:
+                    oddjobd.enable()
+                if not running:
+                    oddjobd.start()
+            except Exception as e:
+                logger.critical("Unable to start oddjobd: %s", str(e))
 
         logger.info("%s enabled", "SSSD" if options.sssd else "LDAP")
 
@@ -2942,23 +3124,6 @@ def _install(options):
                         "Adding hardcoded server name to "
                         "/etc/ldap.conf failed: %s", str(e))
 
-    if options.conf_ntp and not options.on_master:
-        # disable other time&date services first
-        if options.force_ntpd:
-            ntpconf.force_ntpd(statestore)
-
-        if options.ntp_servers:
-            ntp_servers = options.ntp_servers
-        elif ntp_srv_servers:
-            ntp_servers = ntp_srv_servers
-        else:
-            logger.warning("No SRV records of NTP servers found. IPA "
-                           "server address will be used")
-            ntp_servers = cli_server
-
-        ntpconf.config_ntp(ntp_servers, fstore, statestore)
-        logger.info("NTP enabled")
-
     if options.conf_ssh:
         configure_ssh_config(fstore, options)
 
@@ -3002,9 +3167,10 @@ def uninstall(options):
 
     try:
         run([paths.IPA_CLIENT_AUTOMOUNT, "--uninstall", "--debug"])
-    except Exception as e:
-        logger.error(
-            "Unconfigured automount client failed: %s", str(e))
+    except CalledProcessError as e:
+        if e.returncode != CLIENT_NOT_CONFIGURED:
+            logger.error(
+                "Unconfigured automount client failed: %s", str(e))
 
     # Reload the state as automount unconfigure may have modified it
     fstore._load()
@@ -3120,6 +3286,20 @@ def uninstall(options):
             logger.error(
                 "Failed to remove Kerberos service principals: %s", str(e))
 
+    # Restore oddjobd to its original state
+    oddjobd = services.service('oddjobd', api)
+    if not statestore.restore_state('oddjobd', 'running'):
+        try:
+            oddjobd.stop()
+        except Exception:
+            pass
+
+    if not statestore.restore_state('oddjobd', 'enabled'):
+        try:
+            oddjobd.disable()
+        except Exception:
+            pass
+
     logger.info("Disabling client Kerberos and LDAP configurations")
     was_sssd_installed = False
     was_sshd_configured = False
@@ -3139,6 +3319,15 @@ def uninstall(options):
     # Clean up the SSSD cache before SSSD service is stopped or restarted
     remove_file(paths.SSSD_MC_GROUP)
     remove_file(paths.SSSD_MC_PASSWD)
+
+    if was_sssd_installed:
+        try:
+            run([paths.SSSCTL, "cache-remove", "-o", "--stop", "--start"])
+        except Exception:
+            logger.info(
+                "An error occurred while removing SSSD's cache."
+                "Please remove the cache manually by executing "
+                "sssctl cache-remove -o.")
 
     if ipa_domain:
         sssd_domain_ldb = "cache_" + ipa_domain + ".ldb"
@@ -3202,7 +3391,8 @@ def uninstall(options):
 
     # SSSD was not installed before our installation, and no other domains
     # than IPA are configured in sssd.conf - make sure config file is removed
-    elif not was_sssd_installed and not was_sssd_configured:
+    elif not was_sssd_installed and not was_sssd_configured \
+            and os.path.exists(paths.SSSD_CONF):
         try:
             os.rename(paths.SSSD_CONF, paths.SSSD_CONF_DELETED)
         except OSError:
@@ -3247,35 +3437,7 @@ def uninstall(options):
                 service.service_name
             )
 
-    ntp_configured = statestore.has_state('ntp')
-    if ntp_configured:
-        ntp_enabled = statestore.restore_state('ntp', 'enabled')
-        ntp_step_tickers = statestore.restore_state('ntp', 'step-tickers')
-        restored = False
-
-        try:
-            # Restore might fail due to file missing in backup
-            # the reason for it might be that freeipa-client was updated
-            # to this version but not unenrolled/enrolled again
-            # In such case it is OK to fail
-            restored = fstore.restore_file(paths.NTP_CONF)
-            restored |= fstore.restore_file(paths.SYSCONFIG_NTPD)
-            if ntp_step_tickers:
-                restored |= fstore.restore_file(paths.NTP_STEP_TICKERS)
-        except Exception:
-            pass
-
-        if not ntp_enabled:
-            services.knownservices.ntpd.stop()
-            services.knownservices.ntpd.disable()
-        else:
-            if restored:
-                services.knownservices.ntpd.restart()
-
-    try:
-        ntpconf.restore_forced_ntpd(statestore)
-    except CalledProcessError as e:
-        logger.error('Failed to start chronyd: %s', e)
+    restore_time_sync(statestore, fstore)
 
     if was_sshd_configured and services.knownservices.sshd.is_running():
         services.knownservices.sshd.restart()
@@ -3320,6 +3482,10 @@ def uninstall(options):
 
     # Remove the IPA configuration file
     remove_file(paths.IPA_DEFAULT_CONF)
+
+    # Remove misc backups
+    remove_file(paths.OPENLDAP_LDAP_CONF + '.ipabkp')
+    remove_file(paths.NSSWITCH_CONF + '.ipabkp')
 
     # Remove the CA cert from the systemwide certificate store
     tasks.remove_ca_certs_from_systemwide_ca_store()
@@ -3449,6 +3615,12 @@ class ClientInstallInterface(hostname_.HostNameInstallInterface,
     )
     ntp_servers = enroll_only(ntp_servers)
 
+    ntp_pool = knob(
+        str, None,
+        description="ntp server pool to use",
+    )
+    ntp_pool = enroll_only(ntp_pool)
+
     no_ntp = knob(
         None,
         description="do not configure ntp",
@@ -3457,9 +3629,10 @@ class ClientInstallInterface(hostname_.HostNameInstallInterface,
     no_ntp = enroll_only(no_ntp)
 
     force_ntpd = knob(
-        None,
+        None, False,
+        deprecated=True,
         description="Stop and disable any time&date synchronization services "
-                    "besides ntpd",
+                    "besides ntpd. This option has been deprecated",
     )
     force_ntpd = enroll_only(force_ntpd)
 
@@ -3518,6 +3691,7 @@ class ClientInstallInterface(hostname_.HostNameInstallInterface,
 
     request_cert = knob(
         None,
+        deprecated=True,
         description="request certificate for the machine",
     )
     request_cert = prepare_only(request_cert)
@@ -3529,9 +3703,25 @@ class ClientInstallInterface(hostname_.HostNameInstallInterface,
             raise RuntimeError(
                 "--server cannot be used without providing --domain")
 
-        if self.force_ntpd and self.no_ntp:
+        if self.force_ntpd:
+            logger.warning(
+                "Option --force-ntpd has been deprecated and will be "
+                "removed in a future release."
+            )
+
+        if self.ntp_servers and self.no_ntp:
             raise RuntimeError(
-                "--force-ntpd cannot be used together with --no-ntp")
+                "--ntp-server cannot be used together with --no-ntp")
+
+        if self.ntp_pool and self.no_ntp:
+            raise RuntimeError(
+                "--ntp-pool cannot be used together with --no-ntp")
+
+        if self.request_cert:
+            logger.warning(
+                "Option --request-cert has been deprecated and will be "
+                "removed in a future release."
+            )
 
         if self.no_nisdomain and self.nisdomain:
             raise RuntimeError(
@@ -3555,7 +3745,6 @@ class ClientInstall(ClientInstallInterface,
     Client installer
     """
 
-    replica_file = None
     dm_password = None
 
     ca_cert_files = extend_knob(
@@ -3584,11 +3773,7 @@ class ClientInstall(ClientInstallInterface,
     def prompt_password(self):
         return self.interactive
 
-    no_ac = knob(
-        None,
-        description="do not modify the nsswitch.conf and PAM configuration",
-        cli_names='--noac',
-    )
+    no_ac = False
 
     force = knob(
         None,

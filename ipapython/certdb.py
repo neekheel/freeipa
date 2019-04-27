@@ -173,6 +173,11 @@ def unparse_trust_flags(trust_flags):
 
 
 def verify_kdc_cert_validity(kdc_cert, ca_certs, realm):
+    """
+    Verifies the validity of a kdc_cert, ensuring it is trusted by
+    the ca_certs chain, has a PKINIT_KDC extended key usage support,
+    and verify it applies to the given realm.
+    """
     with NamedTemporaryFile() as kdc_file, NamedTemporaryFile() as ca_file:
         kdc_file.write(kdc_cert.public_bytes(x509.Encoding.PEM))
         kdc_file.flush()
@@ -205,7 +210,33 @@ def verify_kdc_cert_validity(kdc_cert, ca_certs, realm):
             raise ValueError("invalid for realm %s" % realm)
 
 
-class NSSDatabase(object):
+CERT_RE = re.compile(
+    r'^(?P<nick>.+?)\s+(?P<flags>\w*,\w*,\w*)\s*$'
+)
+KEY_RE = re.compile(
+    r'^<\s*(?P<slot>\d+)>'
+    r'\s+(?P<algo>\w+)'
+    r'\s+(?P<keyid>[0-9a-z]+)'
+    r'\s+(?P<nick>.*?)\s*$'
+)
+
+
+class Pkcs12ImportIncorrectPasswordError(RuntimeError):
+    """ Raised when import_pkcs12 fails because of a wrong password.
+    """
+
+
+class Pkcs12ImportOpenError(RuntimeError):
+    """ Raised when import_pkcs12 fails trying to open the file.
+    """
+
+
+class Pkcs12ImportUnknownError(RuntimeError):
+    """ Raised when import_pkcs12 fails because of an unknown error.
+    """
+
+
+class NSSDatabase:
     """A general-purpose wrapper around a NSS cert database
 
     For permanent NSS databases, pass the cert DB directory to __init__
@@ -297,7 +328,9 @@ class NSSDatabase(object):
         ]
         new_args.extend(args)
         new_args.extend(['-f', self.pwd_file])
-        return ipautil.run(new_args, stdin, **kwargs)
+        # When certutil makes a request it creates a file in the cwd, make
+        # sure we are in a unique place when this happens.
+        return ipautil.run(new_args, stdin, cwd=self.secdir, **kwargs)
 
     def run_pk12util(self, args, stdin=None, **kwargs):
         self._check_db()
@@ -352,7 +385,9 @@ class NSSDatabase(object):
                                  os.O_CREAT | os.O_WRONLY,
                                  pwdfilemode), 'w', closefd=True) as f:
                 f.write(ipautil.ipa_generate_password())
+                # flush and sync tempfile inode
                 f.flush()
+                os.fsync(f.fileno())
 
         # In case dbtype is auto, let certutil decide which type of DB
         # to create.
@@ -360,14 +395,15 @@ class NSSDatabase(object):
             dbdir = self.secdir
         else:
             dbdir = '{}:{}'.format(self.dbtype, self.secdir)
-        ipautil.run([
+        args = [
             paths.CERTUTIL,
             '-d', dbdir,
             '-N',
             '-f', self.pwd_file,
             # -@ in case it's an old db and it must be migrated
             '-@', self.pwd_file,
-        ])
+        ]
+        ipautil.run(args, stdin=None, cwd=self.secdir)
         self._set_filenames(self._detect_dbtype())
         if self.filenames is None:
             # something went wrong...
@@ -415,7 +451,7 @@ class NSSDatabase(object):
             '-d', 'sql:{}'.format(self.secdir), '-N',
             '-f', self.pwd_file, '-@', self.pwd_file
         ]
-        ipautil.run(args)
+        ipautil.run(args, stdin=None, cwd=self.secdir)
 
         # retain file ownership and permission, backup old files
         migration = (
@@ -462,10 +498,10 @@ class NSSDatabase(object):
         # FIXME, this relies on NSS never changing the formatting of certutil
         certlist = []
         for cert in certs:
-            match = re.match(r'^(.+?)\s+(\w*,\w*,\w*)\s*$', cert)
+            match = CERT_RE.match(cert)
             if match:
-                nickname = match.group(1)
-                trust_flags = parse_trust_flags(match.group(2))
+                nickname = match.group('nick')
+                trust_flags = parse_trust_flags(match.group('flags'))
                 certlist.append((nickname, trust_flags))
 
         return tuple(certlist)
@@ -478,10 +514,14 @@ class NSSDatabase(object):
             return ()
         keylist = []
         for line in result.output.splitlines():
-            mo = re.match(r'^<\s*(\d+)>\s+(\w+)\s+([0-9a-z]+)\s+(.*)$', line)
+            mo = KEY_RE.match(line)
             if mo is not None:
-                slot, algo, keyid, nick = mo.groups()
-                keylist.append((int(slot), algo, keyid, nick.strip()))
+                keylist.append((
+                    int(mo.group('slot')),
+                    mo.group('algo'),
+                    mo.group('keyid'),
+                    mo.group('nick'),
+                ))
         return tuple(keylist)
 
     def find_server_certs(self):
@@ -500,6 +540,9 @@ class NSSDatabase(object):
 
     def get_trust_chain(self, nickname):
         """Return names of certs in a given cert's trust chain
+
+        The list starts with root ca, then first intermediate CA, second
+        intermediate, and so on.
 
         :param nickname: Name of the cert
         :return: List of certificate names
@@ -553,13 +596,15 @@ class NSSDatabase(object):
         try:
             self.run_pk12util(args)
         except ipautil.CalledProcessError as e:
-            if e.returncode == 17:
-                raise RuntimeError("incorrect password for pkcs#12 file %s" %
-                    pkcs12_filename)
+            if e.returncode == 17 or e.returncode == 18:
+                raise Pkcs12ImportIncorrectPasswordError(
+                    "incorrect password for pkcs#12 file %s" % pkcs12_filename)
             elif e.returncode == 10:
-                raise RuntimeError("Failed to open %s" % pkcs12_filename)
+                raise Pkcs12ImportOpenError(
+                    "Failed to open %s" % pkcs12_filename)
             else:
-                raise RuntimeError("unknown error import pkcs#12 file %s" %
+                raise Pkcs12ImportUnknownError(
+                    "unknown error import pkcs#12 file %s" %
                     pkcs12_filename)
         finally:
             if pkcs12_password_file is not None:
@@ -697,8 +742,13 @@ class NSSDatabase(object):
             if import_keys:
                 try:
                     self.import_pkcs12(filename, key_password)
-                except RuntimeError:
+                except Pkcs12ImportUnknownError:
+                    # the file may not be a PKCS#12 file,
+                    # go to the generic error about unrecognized format
                     pass
+                except RuntimeError as e:
+                    raise RuntimeError("Failed to load %s: %s" %
+                                       (filename, str(e)))
                 else:
                     if key_file:
                         raise RuntimeError(
@@ -724,7 +774,9 @@ class NSSDatabase(object):
 
                     continue
 
-            raise RuntimeError("Failed to load %s" % filename)
+            # Supported formats were tried but none succeeded
+            raise RuntimeError("Failed to load %s: unrecognized format" %
+                               filename)
 
         if import_keys and not key_file:
             raise RuntimeError(
@@ -844,8 +896,15 @@ class NSSDatabase(object):
         cert = self.get_cert(nickname)
 
         try:
-            self.run_certutil(['-V', '-n', nickname, '-u', 'V'],
-                              capture_output=True)
+            self.run_certutil(
+                [
+                    '-V',  # check validity of cert and attrs
+                    '-n', nickname,
+                    '-u', 'V',  # usage; 'V' means "SSL server"
+                    '-e',  # check signature(s); this checks
+                    # key sizes, sig algorithm, etc.
+                ],
+                capture_output=True)
         except ipautil.CalledProcessError as e:
             # certutil output in case of error is
             # 'certutil: certificate is invalid: <ERROR_STRING>\n'
@@ -856,7 +915,7 @@ class NSSDatabase(object):
         except ValueError:
             raise ValueError('invalid for server %s' % hostname)
 
-    def verify_ca_cert_validity(self, nickname):
+    def verify_ca_cert_validity(self, nickname, minpathlen=None):
         cert = self.get_cert(nickname)
 
         if not cert.subject:
@@ -870,16 +929,35 @@ class NSSDatabase(object):
 
         if not bc.value.ca:
             raise ValueError("not a CA certificate")
+        if minpathlen is not None:
+            # path_length is None means no limitation
+            pl = bc.value.path_length
+            if pl is not None and pl < minpathlen:
+                raise ValueError(
+                    "basic contraint pathlen {}, must be at least {}".format(
+                        pl, minpathlen
+                    )
+                )
 
         try:
-            cert.extensions.get_extension_for_class(
+            ski = cert.extensions.get_extension_for_class(
                     cryptography.x509.SubjectKeyIdentifier)
         except cryptography.x509.ExtensionNotFound:
             raise ValueError("missing subject key identifier extension")
+        else:
+            if len(ski.value.digest) == 0:
+                raise ValueError("subject key identifier must not be empty")
 
         try:
-            self.run_certutil(['-V', '-n', nickname, '-u', 'L'],
-                              capture_output=True)
+            self.run_certutil(
+                [
+                    '-V',       # check validity of cert and attrs
+                    '-n', nickname,
+                    '-u', 'L',  # usage; 'L' means "SSL CA"
+                    '-e',       # check signature(s); this checks
+                                # key sizes, sig algorithm, etc.
+                ],
+                capture_output=True)
         except ipautil.CalledProcessError as e:
             # certutil output in case of error is
             # 'certutil: certificate is invalid: <ERROR_STRING>\n'

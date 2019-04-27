@@ -418,9 +418,19 @@ def add_range(myapi, trustinstance, range_name, dom_sid, *keys, **options):
     return range_type, range_size, base_id
 
 
-def fetch_trusted_domains_over_dbus(myapi, forest_name):
+def fetch_trusted_domains_over_dbus(myapi, *keys, **options):
     if not _bindings_installed:
         return
+
+    forest_name = keys[0]
+    method_options = []
+    if 'realm_server' in options:
+        method_options.extend(['--server', options['realm_server']])
+    if 'realm_admin' in options:
+        method_options.extend(['--admin', options['realm_admin']])
+    if 'realm_passwd' in options:
+        method_options.extend(['--password', options['realm_passwd']])
+
     # Calling oddjobd-activated service via DBus has some quirks:
     # - Oddjobd registers multiple canonical names on the same address
     # - python-dbus only follows name owner changes when mainloop is in use
@@ -436,7 +446,15 @@ def fetch_trusted_domains_over_dbus(myapi, forest_name):
         fetch_domains_method = intf.get_dbus_method(
                 'fetch_domains',
                 dbus_interface=DBUS_IFACE_TRUST)
-        (_ret, _stdout, _stderr) = fetch_domains_method(forest_name)
+        # Oddjobd D-BUS method definition only accepts fixed number
+        # of arguments on the command line. Thus, we need to pass
+        # remaining ones as ''. There are 30 slots to allow for extension
+        # and the number comes from the 'arguments' definition in
+        # install/oddjob/etc/oddjobd.conf.d/oddjobd-ipa-trust.conf
+        method_arguments = [forest_name]
+        method_arguments.extend(method_options)
+        method_arguments.extend([''] * (30 - len(method_arguments)))
+        (_ret, _stdout, _stderr) = fetch_domains_method(*method_arguments)
     except dbus.DBusException as e:
         logger.error('Failed to call %s.fetch_domains helper.'
                      'DBus exception is %s.', DBUS_IFACE_TRUST, str(e))
@@ -559,7 +577,7 @@ class trust(LDAPObject):
                 continue
             for value in values:
                 if not ipaserver.dcerpc.is_sid_valid(value):
-                    err = unicode(_("invalid SID: {SID}")).format(SID=value)
+                    err = _("invalid SID: {SID}").format(SID=value)
                     raise errors.ValidationError(name=attr, error=err)
 
     def get_dn(self, *keys, **kwargs):
@@ -685,8 +703,8 @@ ipa idrange-del before retrying the command with the desired range type.
         StrEnum('range_type?',
                 label=_('Range type'),
                 cli_name='range_type',
-                doc=(_('Type of trusted domain ID range, one of {vals}'
-                     .format(vals=', '.join(sorted(range_types))))),
+                doc=_('Type of trusted domain ID range, one of allowed ' +
+                      'values'),
                 values=sorted(range_types),
                 ),
         Bool('bidirectional?',
@@ -992,9 +1010,9 @@ ipa idrange-del before retrying the command with the desired range type.
                     trust_type
                 )
             except errors.NotFound:
-                _message = _("Unable to resolve domain controller for "
-                             "{domain} domain. ")
-                error_message = unicode(_message).format(domain=keys[-1])
+                error_message = _("Unable to resolve domain controller for "
+                                  "{domain} domain. "
+                                  ).format(domain=keys[-1])
                 instructions = []
 
                 if dns_container_exists(self.obj.backend):
@@ -1020,7 +1038,7 @@ ipa idrange-del before retrying the command with the desired range type.
                             "found in the documentation. "
                         )
                         instructions.append(
-                            unicode(_instruction).format(domain=keys[-1])
+                            _instruction.format(domain=keys[-1])
                         )
                 else:
                     _instruction = _(
@@ -1029,7 +1047,7 @@ ipa idrange-del before retrying the command with the desired range type.
                         "domain from IPA hosts and back."
                     )
                     instructions.append(
-                        unicode(_instruction).format(domain=keys[-1])
+                        _instruction.format(domain=keys[-1])
                     )
                 raise errors.NotFound(
                     reason=error_message,
@@ -1760,10 +1778,20 @@ class trust_fetch_domains(LDAPRetrieve):
 
     has_output = output.standard_list_of_entries
     takes_options = LDAPRetrieve.takes_options + (
+        Str('realm_admin?',
+            cli_name='admin',
+            label=_("Active Directory domain administrator"),
+            ),
+        Password('realm_passwd?',
+                 cli_name='password',
+                 label=_("Active Directory domain administrator's password"),
+                 confirm=False,
+                 ),
         Str('realm_server?',
             cli_name='server',
-            label=_('Domain controller for the Active Directory domain (optional)'),
-        ),
+            label=_('Domain controller for the Active Directory domain '
+                    '(optional)'),
+            ),
     )
 
     def execute(self, *keys, **options):
@@ -1784,7 +1812,7 @@ class trust_fetch_domains(LDAPRetrieve):
         # With privilege separation we also cannot authenticate as
         # HTTP/ principal because we have no access to its key material.
         # Thus, we'll use DBus call out to oddjobd helper in all cases
-        fetch_trusted_domains_over_dbus(self.api, keys[0])
+        fetch_trusted_domains_over_dbus(self.api, *keys, **options)
         result['summary'] = unicode(_('List of trust domains successfully '
                                       'refreshed. Use trustdomain-find '
                                       'command to list them.'))

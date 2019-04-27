@@ -62,7 +62,7 @@ var IPA = function () {
     that.jsonrpc_id = 0;
 
     // live server path
-    that.url = '/ipa/ui/';
+    that.url = config.url;
 
     /**
      * jQuery AJAX options used by RPC commands
@@ -75,13 +75,6 @@ var IPA = function () {
         async: true,
         processData: false
     };
-
-    /**
-     * i18n messages
-     * @deprecated
-     * @property {Object}
-     */
-    that.messages = {};
 
     /**
      * User information
@@ -129,7 +122,7 @@ var IPA = function () {
 
         // if current path matches live server path, use live data
         if (that.url && window.location.pathname.substring(0, that.url.length) === that.url) {
-            that.json_url = params.url || '/ipa/session/json';
+            that.json_url = params.url || config.json_url;
 
         } else { // otherwise use fixtures
             that.json_path = params.url || "test/data";
@@ -174,14 +167,6 @@ var IPA = function () {
                 }
             }
         });
-
-        batch.add_command(rpc.command({
-            method: 'i18n_messages',
-            on_success: function(data, text_status, xhr) {
-                that.messages = data.texts;
-                i18n.source = that.messages;
-            }
-        }));
 
         batch.add_command(rpc.command({
             entity: 'config',
@@ -529,7 +514,7 @@ IPA.login_password = function(username, password) {
     };
 
     var request = {
-        url: '/ipa/session/login_password',
+        url: config.forms_login_url,
         data: data,
         contentType: 'application/x-www-form-urlencoded',
         processData: true,
@@ -602,7 +587,7 @@ IPA.reset_password = function(username, old_password, new_password, otp) {
     }
 
     request = {
-        url: '/ipa/session/change_password',
+        url: config.reset_psw_url,
         data: data,
         contentType: 'application/x-www-form-urlencoded',
         processData: true,

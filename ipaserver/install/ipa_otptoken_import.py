@@ -17,6 +17,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import abc
 import base64
 import datetime
@@ -236,7 +238,7 @@ def convertKeyDerivation(value):
     }.get(value.lower(), None)
 
 
-class XMLDecryptor(object):
+class XMLDecryptor:
     """This decrypts values from XML as specified in:
         * http://www.w3.org/TR/xmlenc-core/
         * RFC 6931"""
@@ -283,7 +285,7 @@ class XMLDecryptor(object):
         return out
 
 
-class PSKCKeyPackage(object):
+class PSKCKeyPackage:
     _XML = {
         'pskc:DeviceInfo': {
             'pskc:IssueNo/text()':      ('issueno',      unicode),
@@ -449,7 +451,7 @@ class PSKCKeyPackage(object):
             out['ipatoken' + key] = unicode(reducer(dates).strftime("%Y%m%d%H%M%SZ"))
 
 
-class PSKCDocument(object):
+class PSKCDocument:
     @property
     def keyname(self):
         return self.__keyname

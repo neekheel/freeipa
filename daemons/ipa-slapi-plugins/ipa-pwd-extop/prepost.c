@@ -176,7 +176,11 @@ static bool has_krbprincipalkey(Slapi_Entry *entry) {
 
             if (rc || (num_keys <= 0)) {
                 /* this one is not valid, ignore it */
-                if (keys) ipa_krb5_free_key_data(keys, num_keys);
+                if (keys) {
+                    ipa_krb5_free_key_data(keys, num_keys);
+                    keys = NULL;
+                    num_keys = 0;
+                }
             } else {
                 /* It exists at least this one that is valid, no need to continue */
                 if (keys) ipa_krb5_free_key_data(keys, num_keys);
@@ -762,7 +766,7 @@ static int ipapwd_pre_mod(Slapi_PBlock *pb)
     /* Check this is a clear text password, or refuse operation (only if we need
      * to comput other hashes */
     if (! unhashedpw && (gen_krb_keys || is_smb || is_ipant)) {
-        if ('{' == userpw[0]) {
+        if ((userpw != NULL) && ('{' == userpw[0])) {
             if (0 == strncasecmp(userpw, "{CLEAR}", strlen("{CLEAR}"))) {
                 unhashedpw = slapi_ch_strdup(&userpw[strlen("{CLEAR}")]);
                 if (NULL == unhashedpw) {
@@ -1488,8 +1492,6 @@ int ipapwd_pre_init(Slapi_PBlock *pb)
     ret = slapi_pblock_set(pb, SLAPI_PLUGIN_VERSION, SLAPI_PLUGIN_VERSION_01);
     if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_DESCRIPTION, (void *)&ipapwd_plugin_desc);
     if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_PRE_BIND_FN, (void *)ipapwd_pre_bind);
-    if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_PRE_ADD_FN, (void *)ipapwd_pre_add);
-    if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_PRE_MODIFY_FN, (void *)ipapwd_pre_mod);
 
     return ret;
 }
@@ -1513,9 +1515,7 @@ int ipapwd_post_init(Slapi_PBlock *pb)
 
     ret = slapi_pblock_set(pb, SLAPI_PLUGIN_VERSION, SLAPI_PLUGIN_VERSION_01);
     if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_DESCRIPTION, (void *)&ipapwd_plugin_desc);
-    if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_POST_ADD_FN, (void *)ipapwd_post_modadd);
     if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_POST_DELETE_FN, (void *)ipapwd_post_updatecfg);
-    if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_POST_MODIFY_FN, (void *)ipapwd_post_modadd);
     if (!ret) ret = slapi_pblock_set(pb, SLAPI_PLUGIN_POST_MODRDN_FN, (void *)ipapwd_post_updatecfg);
 
     return ret;

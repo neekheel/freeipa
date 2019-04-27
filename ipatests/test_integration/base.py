@@ -21,17 +21,19 @@
 
 import pytest
 
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
 from pytest_sourceorder import ordered
 
 
 @ordered
 @pytest.mark.usefixtures('mh')
 @pytest.mark.usefixtures('integration_logs')
-class IntegrationTest(object):
+class IntegrationTest:
     num_replicas = 0
     num_clients = 0
     num_ad_domains = 0
+    num_ad_subdomains = 0
+    num_ad_treedomains = 0
     required_extra_roles = []
     topology = None
     domain_level = None

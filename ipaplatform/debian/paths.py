@@ -8,6 +8,8 @@ in Debian-based systems.
 """
 
 # Fallback to default path definitions
+from __future__ import absolute_import
+
 from ipaplatform.base.paths import BasePathNamespace
 import sysconfig
 
@@ -26,6 +28,8 @@ class DebianPathNamespace(BasePathNamespace):
     HTTPD_IPA_REWRITE_CONF = "/etc/apache2/conf-available/ipa-rewrite.conf"
     HTTPD_IPA_CONF = "/etc/apache2/conf-enabled/ipa.conf"
     HTTPD_NSS_CONF = "/etc/apache2/mods-available/nss.conf"
+    HTTPD_SSL_CONF = "/etc/apache2/mods-available/ssl.conf"
+    HTTPD_SSL_SITE_CONF = "/etc/apache2/sites-available/default-ssl.conf"
     OLD_IPA_KEYTAB = "/etc/apache2/ipa.keytab"
     HTTPD_PASSWORD_CONF = "/etc/apache2/password.conf"
     NAMED_CONF = "/etc/bind/named.conf"
@@ -35,6 +39,7 @@ class DebianPathNamespace(BasePathNamespace):
     NAMED_ROOT_KEY = "/etc/bind/bind.keys"
     NAMED_BINDKEYS_FILE = "/etc/bind/bind.keys"
     NAMED_MANAGED_KEYS_DIR = "/var/cache/bind/dynamic"
+    CHRONY_CONF = "/etc/chrony/chrony.conf"
     OPENLDAP_LDAP_CONF = "/etc/ldap/ldap.conf"
     ETC_DEBIAN_VERSION = "/etc/debian_version"
     IPA_P11_KIT = "/usr/local/share/ca-certificates/ipa-ca.crt"
@@ -60,33 +65,42 @@ class DebianPathNamespace(BasePathNamespace):
     OLD_KRA_AGENT_PEM = "/etc/apache2/nssdb/kra-agent.pem"
     SBIN_SERVICE = "/usr/sbin/service"
     CERTMONGER_COMMAND_TEMPLATE = "/usr/lib/ipa/certmonger/%s"
+    ODS_KSMUTIL = None
+    ODS_ENFORCER = "/usr/sbin/ods-enforcer"
+    ODS_ENFORCER_DB_SETUP = "/usr/sbin/ods-enforcer-db-setup"
     UPDATE_CA_TRUST = "/usr/sbin/update-ca-certificates"
     BIND_LDAP_DNS_IPA_WORKDIR = "/var/cache/bind/dyndb-ldap/ipa/"
     BIND_LDAP_DNS_ZONE_WORKDIR = "/var/cache/bind/dyndb-ldap/ipa/master/"
+    LIBARCH = "/{0}".format(MULTIARCH)
     LIBSOFTHSM2_SO = "/usr/lib/softhsm/libsofthsm2.so"
     PAM_KRB5_SO = "/usr/lib/{0}/security/pam_krb5.so".format(MULTIARCH)
     LIB_SYSTEMD_SYSTEMD_DIR = "/lib/systemd/system/"
+    LIBEXEC_CERTMONGER_DIR = "/usr/lib/certmonger"
     DOGTAG_IPA_CA_RENEW_AGENT_SUBMIT = "/usr/lib/certmonger/dogtag-ipa-ca-renew-agent-submit"
     DOGTAG_IPA_RENEW_AGENT_SUBMIT = "/usr/lib/certmonger/dogtag-ipa-renew-agent-submit"
     CERTMONGER_DOGTAG_SUBMIT = "/usr/lib/certmonger/dogtag-submit"
     IPA_SERVER_GUARD = "/usr/lib/certmonger/ipa-server-guard"
     GENERATE_RNDC_KEY = "/bin/true"
+    LIBEXEC_IPA_DIR = "/usr/lib/ipa"
     IPA_DNSKEYSYNCD_REPLICA = "/usr/lib/ipa/ipa-dnskeysync-replica"
     IPA_DNSKEYSYNCD = "/usr/lib/ipa/ipa-dnskeysyncd"
     IPA_HTTPD_KDCPROXY = "/usr/lib/ipa/ipa-httpd-kdcproxy"
     IPA_ODS_EXPORTER = "/usr/lib/ipa/ipa-ods-exporter"
+    IPA_PKI_RETRIEVE_KEY = "/usr/lib/ipa/ipa-pki-retrieve-key"
+    IPA_HTTPD_PASSWD_READER = "/usr/lib/ipa/ipa-httpd-pwdreader"
+    IPA_PKI_WAIT_RUNNING = "/usr/lib/ipa/ipa-pki-wait-running"
     HTTPD = "/usr/sbin/apache2ctl"
-    REMOVE_DS_PL = "/usr/sbin/remove-ds"
-    SETUP_DS_PL = "/usr/sbin/setup-ds"
     FONTS_DIR = "/usr/share/fonts/truetype"
+    FONTS_OPENSANS_DIR = "/usr/share/fonts/truetype/open-sans"
+    FONTS_FONTAWESOME_DIR = "/usr/share/fonts/truetype/fontawesome"
     VAR_KERBEROS_KRB5KDC_DIR = "/var/lib/krb5kdc/"
     VAR_KRB5KDC_K5_REALM = "/var/lib/krb5kdc/.k5."
-    CACERT_PEM = "/var/lib/krb5kdc/cacert.pem"
+    CACERT_PEM = "/var/lib/ipa/certs/cacert.pem"
     KRB5KDC_KADM5_ACL = "/etc/krb5kdc/kadm5.acl"
     KRB5KDC_KADM5_KEYTAB = "/etc/krb5kdc/kadm5.keytab"
     KRB5KDC_KDC_CONF = "/etc/krb5kdc/kdc.conf"
-    KDC_CERT = "/var/lib/krb5kdc/kdc.crt"
-    KDC_KEY = "/var/lib/krb5kdc/kdc.key"
+    KDC_CERT = "/var/lib/ipa/certs/kdc.crt"
+    KDC_KEY = "/var/lib/ipa/certs/kdc.key"
     VAR_LOG_HTTPD_DIR = "/var/log/apache2"
     VAR_LOG_HTTPD_ERROR = "/var/log/apache2/error.log"
     NAMED_RUN = "/var/cache/bind/named.run"

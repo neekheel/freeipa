@@ -35,6 +35,7 @@ import pytest
 
 pytestmark = pytest.mark.tier0
 
+
 class test_Plugin(ClassChecker):
     """
     Test the `ipalib.plugable.Plugin` class.
@@ -76,19 +77,11 @@ class test_Plugin(ClassChecker):
         assert o.summary == u'<%s.%s>' % (another_subclass.__module__,
                                           another_subclass.__name__)
 
-        # Test that Plugin makes sure the subclass hasn't defined attributes
-        # whose names conflict with the logger methods set in Plugin.__init__():
-        class check(self.cls):
-            info = 'whatever'
-        e = raises(Exception, check, api)
-        assert str(e) == \
-            "info is already bound to ipatests.test_ipalib.test_plugable.check()"
-
     def test_finalize(self):
         """
         Test the `ipalib.plugable.Plugin.finalize` method.
         """
-        class api(object):
+        class api:
             @staticmethod
             def is_production_mode():
                 return False
@@ -102,14 +95,15 @@ def test_Registry():
     """
     Test the `ipalib.plugable.Registry` class
     """
-    class Base1(object):
-        pass
-    class Base2(object):
+    class Base1:
         pass
 
+    class Base2:
+        pass
 
     class plugin1(Base1):
         pass
+
     class plugin2(Base2):
         pass
 

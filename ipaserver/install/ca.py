@@ -6,7 +6,7 @@
 CA installer module
 """
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import enum
 import logging
@@ -20,11 +20,9 @@ from ipalib.install.service import enroll_only, master_install_only, replica_ins
 from ipaserver.install import sysupgrade
 from ipapython.install import typing
 from ipapython.install.core import group, knob, extend_knob
-from ipaserver.install import (cainstance,
-                               custodiainstance,
-                               dsinstance,
-                               bindinstance)
+from ipaserver.install import cainstance, bindinstance, dsinstance
 from ipapython import ipautil, certdb
+from ipapython import ipaldap
 from ipapython.admintool import ScriptError
 from ipaplatform import services
 from ipaplatform.paths import paths
@@ -33,7 +31,7 @@ from ipaserver.install.replication import replica_conn_check
 from ipalib import api, errors
 from ipapython.dn import DN
 
-from . import conncheck, dogtag
+from . import conncheck, dogtag, cainstance
 
 if six.PY3:
     unicode = str
@@ -87,7 +85,7 @@ def lookup_ca_subject(api, subject_base):
         # installutils.default_ca_subject_dn is NOT used here in
         # case the default changes in the future.
         ca_subject = DN(('CN', 'Certificate Authority'), subject_base)
-    return six.text_type(ca_subject)
+    return str(ca_subject)
 
 
 def set_subject_base_in_config(subject_base):
@@ -108,9 +106,44 @@ def print_ca_configuration(options):
     print("The CA will be configured with:")
     print("Subject DN:   {}".format(options.ca_subject))
     print("Subject base: {}".format(options.subject_base))
-    print("Chaining:     {}".format(
-        "externally signed (two-step installation)" if options.external_ca
-        else "self-signed"))
+    if options.external_ca:
+        chaining = "externally signed (two-step installation)"
+    elif options.external_cert_files:
+        chaining = "externally signed"
+    else:
+        chaining = "self-signed"
+    print("Chaining:     {}".format(chaining))
+
+
+def uninstall_check(options):
+    """Check if the host is CRL generation master"""
+    # Skip the checks if the host is not a CA instance
+    ca = cainstance.CAInstance(api.env.realm)
+    if not (api.Command.ca_is_enabled()['result'] and
+       cainstance.is_ca_installed_locally()):
+        return
+
+    # skip the checks if the host is the last master
+    ipa_config = api.Command.config_show()['result']
+    ipa_masters = ipa_config.get('ipa_master_server', [])
+    if len(ipa_masters) <= 1:
+        return
+
+    try:
+        crlgen_enabled = ca.is_crlgen_enabled()
+    except cainstance.InconsistentCRLGenConfigException:
+        # If config is inconsistent, let's be safe and act as if
+        # crl gen was enabled
+        crlgen_enabled = True
+
+    if crlgen_enabled:
+        print("Deleting this server will leave your installation "
+              "without a CRL generation master.")
+        if (options.unattended and not options.ignore_last_of_role) or \
+           not (options.unattended or ipautil.user_input(
+                "Are you sure you want to continue with the uninstall "
+                "procedure?", False)):
+            raise ScriptError("Aborting uninstall operation.")
 
 
 def install_check(standalone, replica_config, options):
@@ -129,7 +162,7 @@ def install_check(standalone, replica_config, options):
         _api = api if standalone else options._remote_api
 
         # for replica-install the knobs cannot be written, hence leading '_'
-        options._subject_base = six.text_type(replica_config.subject_base)
+        options._subject_base = str(replica_config.subject_base)
         options._ca_subject = lookup_ca_subject(_api, options._subject_base)
 
     if replica_config is not None and not replica_config.setup_ca:
@@ -138,10 +171,6 @@ def install_check(standalone, replica_config, options):
     if replica_config is not None:
         if standalone and api.env.ra_plugin == 'selfsign':
             raise ScriptError('A selfsign CA can not be added')
-
-        cafile = os.path.join(replica_config.dir, 'cacert.p12')
-        if not options.promote and not os.path.isfile(cafile):
-            raise ScriptError('CA cannot be installed in CA-less setup.')
 
         if standalone and not options.skip_conncheck:
             principal = options.principal
@@ -152,8 +181,6 @@ def install_check(standalone, replica_config, options):
 
         if options.skip_schema_check:
             logger.info("Skipping CA DS schema check")
-        else:
-            cainstance.replica_ca_install_check(replica_config, options.promote)
 
         return
 
@@ -205,13 +232,16 @@ def install_check(standalone, replica_config, options):
                     )
 
     if not options.external_cert_files:
-        if not cainstance.check_port():
-            print("IPA requires port 8443 for PKI but it is currently in use.")
+        if not cainstance.check_ports():
+            print(
+                "IPA requires ports 8080 and 8443 for PKI, but one or more "
+                "are currently in use."
+            )
             raise ScriptError("Aborting installation")
 
     if standalone:
         dirname = dsinstance.config_dirname(
-            installutils.realm_to_serverid(realm_name))
+            ipaldap.realm_to_serverid(realm_name))
         cadb = certs.CertDB(realm_name, nssdir=paths.PKI_TOMCAT_ALIAS_DIR,
                             subject_base=options._subject_base)
         dsdb = certs.CertDB(
@@ -237,12 +267,12 @@ def install_check(standalone, replica_config, options):
                         "cannot continue." % (subject, db.secdir))
 
 
-def install(standalone, replica_config, options):
-    install_step_0(standalone, replica_config, options)
-    install_step_1(standalone, replica_config, options)
+def install(standalone, replica_config, options, custodia):
+    install_step_0(standalone, replica_config, options, custodia=custodia)
+    install_step_1(standalone, replica_config, options, custodia=custodia)
 
 
-def install_step_0(standalone, replica_config, options):
+def install_step_0(standalone, replica_config, options, custodia):
     realm_name = options.realm_name
     dm_password = options.dm_password
     host_name = options.host_name
@@ -274,14 +304,9 @@ def install_step_0(standalone, replica_config, options):
         promote = False
     else:
         cafile = os.path.join(replica_config.dir, 'cacert.p12')
-        if options.promote:
-            custodia = custodiainstance.CustodiaInstance(
-                replica_config.host_name,
-                replica_config.realm_name)
-            custodia.get_ca_keys(
-                replica_config.ca_host_name,
-                cafile,
-                replica_config.dirman_password)
+        custodia.get_ca_keys(
+            cafile,
+            replica_config.dirman_password)
 
         ca_signing_algorithm = None
         ca_type = None
@@ -294,7 +319,7 @@ def install_step_0(standalone, replica_config, options):
         master_replication_port = replica_config.ca_ds_port
         ra_p12 = os.path.join(replica_config.dir, 'ra.p12')
         ra_only = not replica_config.setup_ca
-        promote = options.promote
+        promote = True
 
     # if upgrading from CA-less to CA-ful, need to rewrite
     # certmap.conf and subject_base configuration
@@ -304,26 +329,35 @@ def install_step_0(standalone, replica_config, options):
         'certmap.conf', 'subject_base', str(subject_base))
     dsinstance.write_certmap_conf(realm_name, ca_subject)
 
-    ca = cainstance.CAInstance(realm_name, host_name=host_name)
-    ca.configure_instance(host_name, dm_password, dm_password,
-                          subject_base=subject_base,
-                          ca_subject=ca_subject,
-                          ca_signing_algorithm=ca_signing_algorithm,
-                          ca_type=ca_type,
-                          external_ca_profile=external_ca_profile,
-                          csr_file=csr_file,
-                          cert_file=cert_file,
-                          cert_chain_file=cert_chain_file,
-                          pkcs12_info=pkcs12_info,
-                          master_host=master_host,
-                          master_replication_port=master_replication_port,
-                          ra_p12=ra_p12,
-                          ra_only=ra_only,
-                          promote=promote,
-                          use_ldaps=standalone)
+    # use secure ldaps when installing a replica or upgrading to CA-ful
+    # In both cases, 389-DS is already configured to have a trusted cert.
+    use_ldaps = standalone or replica_config is not None
+
+    ca = cainstance.CAInstance(
+        realm=realm_name, host_name=host_name, custodia=custodia
+    )
+    ca.configure_instance(
+        host_name, dm_password, dm_password,
+        subject_base=subject_base,
+        ca_subject=ca_subject,
+        ca_signing_algorithm=ca_signing_algorithm,
+        ca_type=ca_type,
+        external_ca_profile=external_ca_profile,
+        csr_file=csr_file,
+        cert_file=cert_file,
+        cert_chain_file=cert_chain_file,
+        pkcs12_info=pkcs12_info,
+        master_host=master_host,
+        master_replication_port=master_replication_port,
+        ra_p12=ra_p12,
+        ra_only=ra_only,
+        promote=promote,
+        use_ldaps=use_ldaps,
+        pki_config_override=options.pki_config_override,
+    )
 
 
-def install_step_1(standalone, replica_config, options):
+def install_step_1(standalone, replica_config, options, custodia):
     if replica_config is not None and not replica_config.setup_ca:
         return
 
@@ -332,7 +366,9 @@ def install_step_1(standalone, replica_config, options):
     subject_base = options._subject_base
     basedn = ipautil.realm_to_suffix(realm_name)
 
-    ca = cainstance.CAInstance(realm_name, host_name=host_name)
+    ca = cainstance.CAInstance(
+        realm=realm_name, host_name=host_name, custodia=custodia
+    )
 
     ca.stop('pki-tomcat')
 
@@ -346,7 +382,7 @@ def install_step_1(standalone, replica_config, options):
     #
     ca.setup_lightweight_ca_key_retrieval()
 
-    serverid = installutils.realm_to_serverid(realm_name)
+    serverid = ipaldap.realm_to_serverid(realm_name)
 
     if standalone and replica_config is None:
         dirname = dsinstance.config_dirname(serverid)

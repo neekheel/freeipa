@@ -5,7 +5,11 @@
 import os
 import pytest
 
-from ipaclient import csrgen
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography import x509
+
+from ipaclient import csrgen, csrgen_ffi
 from ipalib import errors
 
 BASE_DIR = os.path.dirname(__file__)
@@ -50,7 +54,7 @@ class IdentityFormatter(csrgen.Formatter):
         return {'options': syntax_rules}
 
 
-class test_Formatter(object):
+class test_Formatter:
     def test_prepare_data_rule_with_data_source(self, formatter):
         data_rule = csrgen.Rule('uid', '{{subject.uid.0}}',
                                 {'data_source': 'subject.uid.0'})
@@ -131,7 +135,7 @@ class test_Formatter(object):
         assert prepared == 'rule1,rule2'
 
 
-class test_FileRuleProvider(object):
+class test_FileRuleProvider:
     def test_rule_basic(self, rule_provider):
         rule_name = 'basic'
 
@@ -164,7 +168,7 @@ class test_FileRuleProvider(object):
             rule_provider.rules_for_profile('nosuchprofile')
 
 
-class test_CSRGenerator(object):
+class test_CSRGenerator:
     def test_userCert_OpenSSL(self, generator):
         principal = {
             'uid': ['testuser'],
@@ -201,8 +205,66 @@ class test_CSRGenerator(object):
             expected_script = f.read()
         assert script == expected_script
 
+    def test_works_with_lowercase_attr_type_shortname(self, generator):
+        principal = {
+            'uid': ['testuser'],
+            'mail': ['testuser@example.com'],
+        }
+        template_env = {
+            'ipacertificatesubjectbase': [
+                'o=DOMAIN.EXAMPLE.COM'  # lower-case attr type shortname
+            ],
+        }
+        config = generator.csr_config(principal, template_env, 'userCert')
 
-class test_rule_handling(object):
+        key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend(),
+        )
+        adaptor = csrgen.OpenSSLAdaptor(key=key)
+
+        reqinfo = bytes(csrgen_ffi.build_requestinfo(
+            config.encode('utf-8'), adaptor.get_subject_public_key_info()))
+        csr_der = adaptor.sign_csr(reqinfo)
+        csr = x509.load_der_x509_csr(csr_der, default_backend())
+        assert (
+            csr.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+            == [x509.NameAttribute(x509.NameOID.COMMON_NAME, u'testuser')]
+        )
+        assert (
+            csr.subject.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)
+            == [x509.NameAttribute(
+                x509.NameOID.ORGANIZATION_NAME, u'DOMAIN.EXAMPLE.COM')]
+        )
+
+    def test_unrecognised_attr_type_raises(self, generator):
+        principal = {
+            'uid': ['testuser'],
+            'mail': ['testuser@example.com'],
+        }
+        template_env = {
+            'ipacertificatesubjectbase': [
+                'X=DOMAIN.EXAMPLE.COM'  # unrecognised attr type
+            ],
+        }
+        config = generator.csr_config(principal, template_env, 'userCert')
+
+        key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend(),
+        )
+        adaptor = csrgen.OpenSSLAdaptor(key=key)
+
+        with pytest.raises(
+                errors.CSRTemplateError,
+                message='unrecognised attribute type: X'):
+            csrgen_ffi.build_requestinfo(
+                config.encode('utf-8'), adaptor.get_subject_public_key_info())
+
+
+class test_rule_handling:
     def test_optionalAttributeMissing(self, generator):
         principal = {'uid': 'testuser'}
         rule_provider = StubRuleProvider()

@@ -51,7 +51,7 @@ def openLocked(filename, perms):
     #TODO: put section delimiters as separating element of the list
     #      so that we can process multiple sections in one go
     #TODO: add a comment all but provided options as a section option
-class IPAChangeConf(object):
+class IPAChangeConf:
     def __init__(self, name):
         self.progname = name
         self.indent = ("", "", "")
@@ -349,11 +349,17 @@ class IPAChangeConf(object):
                     opts.append(no)
                     continue
                 if no['action'] == 'addifnotset':
+                    opts.append({
+                        'name': 'comment',
+                        'type': 'comment',
+                        'value': self._dump_line(
+                            ' ', no['name'], ' modified by IPA'
+                        ),
+                    })
                     opts.append({'name': 'comment', 'type': 'comment',
                                 'value': self._dump_line(no['name'],
                                                          self.dassign,
                                                          no['value'],
-                                                         u' # modified by IPA'
                                                          )})
                     opts.append(o)
                     continue

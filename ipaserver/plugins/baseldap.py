@@ -319,6 +319,7 @@ def validate_externalhost(ugettext, hostname):
         validate_hostname(hostname, check_fqdn=False, allow_underscore=True)
     except ValueError as e:
         return unicode(e)
+    return None
 
 
 external_host_param = Str('externalhost*', validate_externalhost,
@@ -496,7 +497,7 @@ def host_is_master(ldap, fqdn):
 
     Raises an exception if a master, otherwise returns nothing.
     """
-    master_dn = DN(('cn', fqdn), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+    master_dn = DN(('cn', fqdn), api.env.container_masters, api.env.basedn)
     try:
         ldap.get_entry(master_dn, ['objectclass'])
         raise errors.ValidationError(name='hostname', error=_('An IPA master host cannot be deleted or disabled'))
@@ -829,7 +830,7 @@ def _check_single_value_attrs(params, entry_attrs):
 # required, make sure we enforce that.
 def _check_empty_attrs(params, entry_attrs):
     for (a, v) in entry_attrs.items():
-        if v is None or (isinstance(v, six.string_types) and len(v) == 0):
+        if v is None or (isinstance(v, str) and len(v) == 0):
             if a in params and params[a].required:
                 raise errors.RequirementError(name=a)
 
@@ -1072,7 +1073,9 @@ last, after all sets and adds."""),
                 entry_attrs[attr] = value
             else:
                 # unknown attribute: remove duplicite and invalid values
-                entry_attrs[attr] = list(set([val for val in entry_attrs[attr] if val]))
+                entry_attrs[attr] = list(
+                    {val for val in entry_attrs[attr] if val}
+                )
                 if not entry_attrs[attr]:
                     entry_attrs[attr] = None
                 elif isinstance(entry_attrs[attr], (tuple, list)) and len(entry_attrs[attr]) == 1:
@@ -1970,7 +1973,7 @@ class LDAPSearch(BaseLDAPCommand, crud.Search):
             config_attrs = config.get(
                 self.obj.search_attributes_config, [])
             if len(config_attrs) == 1 and (
-              isinstance(config_attrs[0], six.string_types)):
+                    isinstance(config_attrs[0], str)):
                 search_attrs = config_attrs[0].split(',')
 
         search_kw = {}
@@ -2342,7 +2345,9 @@ class BaseLDAPModAttribute(LDAPQuery):
         return arg.clone(required=True, attribute=attribute, alwaysask=True)
 
     def _update_attrs(self, update, entry_attrs):
-        raise NotImplementedError("%s.update_attrs()", self.__class__.__name__)
+        raise NotImplementedError(
+            "%s.update_attrs()" % self.__class__.__name__
+        )
 
     def execute(self, *keys, **options):
         ldap = self.obj.backend

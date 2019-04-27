@@ -2,7 +2,7 @@
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import errno
@@ -19,6 +19,7 @@ from ipapython.dnsutil import DNSName
 from ipaserver.install import service
 from ipaserver.install import installutils
 from ipapython.dn import DN
+from ipapython import directivesetter
 from ipapython import ipautil
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
@@ -199,9 +200,9 @@ class DNSKeySyncInstance(service.Service):
         # setting up named and ipa-dnskeysyncd to use our softhsm2 config
         for sysconfig in [paths.SYSCONFIG_NAMED,
                           paths.SYSCONFIG_IPA_DNSKEYSYNCD]:
-            installutils.set_directive(sysconfig, 'SOFTHSM2_CONF',
-                                       paths.DNSSEC_SOFTHSM2_CONF,
-                                       quotes=False, separator='=')
+            directivesetter.set_directive(sysconfig, 'SOFTHSM2_CONF',
+                                          paths.DNSSEC_SOFTHSM2_CONF,
+                                          quotes=False, separator='=')
 
         if (token_dir_exists and os.path.exists(paths.DNSSEC_SOFTHSM_PIN) and
                 os.path.exists(paths.DNSSEC_SOFTHSM_PIN_SO)):
@@ -382,8 +383,8 @@ class DNSKeySyncInstance(service.Service):
 
     def __enable(self):
         try:
-            self.ldap_enable('DNSKeySync', self.fqdn, None,
-                             self.suffix, self.extra_config)
+            self.ldap_configure('DNSKeySync', self.fqdn, None,
+                                self.suffix, self.extra_config)
         except errors.DuplicateEntry:
             logger.error("DNSKeySync service already exists")
 

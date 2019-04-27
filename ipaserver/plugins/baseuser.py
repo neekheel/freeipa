@@ -80,7 +80,7 @@ def validate_nsaccountlock(entry_attrs):
     if 'nsaccountlock' in entry_attrs:
         nsaccountlock = entry_attrs['nsaccountlock']
         if not isinstance(nsaccountlock, (bool, Bool)):
-            if not isinstance(nsaccountlock, six.string_types):
+            if not isinstance(nsaccountlock, str):
                 raise errors.OnlyOneValueAllowed(attr='nsaccountlock')
             if nsaccountlock.lower() not in ('true', 'false'):
                 raise errors.ValidationError(name='nsaccountlock',
@@ -358,8 +358,12 @@ class baseuser(LDAPObject):
         ),
         Str('preferredlanguage?',
             label=_('Preferred Language'),
-            pattern='^(([a-zA-Z]{1,8}(-[a-zA-Z]{1,8})?(;q\=((0(\.[0-9]{0,3})?)|(1(\.0{0,3})?)))?' \
-             + '(\s*,\s*[a-zA-Z]{1,8}(-[a-zA-Z]{1,8})?(;q\=((0(\.[0-9]{0,3})?)|(1(\.0{0,3})?)))?)*)|(\*))$',
+            pattern=(
+                r'^(([a-zA-Z]{1,8}(-[a-zA-Z]{1,8})?'
+                r'(;q\=((0(\.[0-9]{0,3})?)|(1(\.0{0,3})?)))?'
+                r'(\s*,\s*[a-zA-Z]{1,8}(-[a-zA-Z]{1,8})?'
+                r'(;q\=((0(\.[0-9]{0,3})?)|(1(\.0{0,3})?)))?)*)|(\*))$'
+            ),
             pattern_errmsg='must match RFC 2068 - 14.4, e.g., "da, en-gb;q=0.8, en;q=0.7"',
         ),
         Certificate('usercertificate*',
@@ -387,7 +391,7 @@ class baseuser(LDAPObject):
             if not isinstance(email, (list, tuple)):
                 email = [email]
             for m in email:
-                if isinstance(m, six.string_types):
+                if isinstance(m, str):
                     if '@' not in m and defaultdomain:
                         m = m + u'@' + defaultdomain
                     if not Email(m):
@@ -481,6 +485,9 @@ class baseuser_add(LDAPCreate):
         assert isinstance(dn, DN)
         set_krbcanonicalname(entry_attrs)
         self.obj.convert_usercertificate_pre(entry_attrs)
+        if entry_attrs.get('ipatokenradiususername', None):
+            add_missing_object_class(ldap, u'ipatokenradiusproxyuser', dn,
+                                     entry_attrs, update=False)
 
     def post_common_callback(self, ldap, dn, entry_attrs, *keys, **options):
         assert isinstance(dn, DN)
@@ -569,8 +576,10 @@ class baseuser_mod(LDAPUpdate):
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
     def check_objectclass(self, ldap, dn, entry_attrs):
-        if ('ipasshpubkey' in entry_attrs or 'ipauserauthtype' in entry_attrs
-            or 'userclass' in entry_attrs or 'ipatokenradiusconfiglink' in entry_attrs):
+        # Some attributes may require additional object classes
+        special_attrs = {'ipasshpubkey', 'ipauserauthtype', 'userclass',
+                         'ipatokenradiusconfiglink', 'ipatokenradiususername'}
+        if special_attrs.intersection(entry_attrs):
             if 'objectclass' in entry_attrs:
                 obj_classes = entry_attrs['objectclass']
             else:
@@ -597,6 +606,15 @@ class baseuser_mod(LDAPUpdate):
 
                     answer = self.api.Object['radiusproxy'].get_dn_if_exists(cl)
                     entry_attrs['ipatokenradiusconfiglink'] = answer
+
+            # Note: we could have used the method add_missing_object_class
+            # but since the data is already fetched and lowercased in
+            # obj_classes, it is more efficient to use the same approach
+            # as the code right above these lines
+            if 'ipatokenradiususername' in entry_attrs:
+                if 'ipatokenradiusproxyuser' not in obj_classes:
+                    entry_attrs['objectclass'].append(
+                        'ipatokenradiusproxyuser')
 
     def pre_common_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
                             **options):

@@ -66,10 +66,7 @@ return {
                             $type: 'textarea',
                             name: 'description'
                         },
-                        {
-                            $type: 'multivalued',
-                            name: 'ipatokenradiusserver' // TODO: add validation
-                        },
+                        'ipatokenradiusserver', // TODO: add validation
                         'ipatokenusermapattribute', // TODO: add validation
                         'ipatokenradiustimeout',
                         'ipatokenradiusretries'
@@ -88,12 +85,10 @@ return {
         }
     ],
     adder_dialog: {
+        title: '@i18n:objects.radiusproxy.add',
         fields: [
             'cn',
-            {
-                $type: 'multivalued',
-                name: 'ipatokenradiusserver'
-            },
+            'ipatokenradiusserver',
             {
                 $type: 'password',
                 name: 'ipatokenradiussecret'
@@ -111,6 +106,9 @@ return {
             },
             'ipatokenusermapattribute'
         ]
+    },
+    deleter_dialog: {
+        title: '@i18n:objects.radiusproxy.remove'
     }
 };};
 

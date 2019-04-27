@@ -22,6 +22,8 @@ Functionality for Command Line Interface.
 """
 from __future__ import print_function
 
+import atexit
+import builtins
 import importlib
 import logging
 import textwrap
@@ -29,17 +31,25 @@ import sys
 import getpass
 import code
 import optparse  # pylint: disable=deprecated-module
+import os
+import pprint
 import fcntl
 import termios
 import struct
 import base64
 import traceback
+try:
+    import readline
+    import rlcompleter
+except ImportError:
+    readline = rlcompleter = None
+
 
 import six
 from six.moves import input
 
 from ipalib.util import (
-    check_client_configuration, get_terminal_height, open_in_pager
+    check_client_configuration, get_pager, get_terminal_height, open_in_pager
 )
 
 if six.PY3:
@@ -56,7 +66,7 @@ from ipalib.errors import (PublicError, CommandError, HelpError, InternalError,
                            NoSuchNamespaceError, ValidationError, NotFound,
                            NotConfiguredError, PromptFailed)
 from ipalib.constants import CLI_TAB, LDAP_GENERALIZED_TIME_FORMAT
-from ipalib.parameters import File, Str, Enum, Any, Flag
+from ipalib.parameters import File, BinaryFile, Str, Enum, Any, Flag
 from ipalib.text import _
 from ipalib import api  # pylint: disable=unused-import
 from ipapython.dnsutil import DNSName
@@ -299,7 +309,7 @@ class textui(backend.Backend):
           objectClass: top
           objectClass: someClass
         """
-        assert isinstance(attr, six.string_types)
+        assert isinstance(attr, str)
         if not isinstance(value, (list, tuple)):
             # single-value attribute
             self.print_indented(format % (attr, self.encode_binary(value)), indent)
@@ -438,7 +448,7 @@ class textui(backend.Backend):
         ------------------
         Only dashed above.
         """
-        assert isinstance(dash, six.string_types)
+        assert isinstance(dash, str)
         assert len(dash) == 1
         dashes = dash * len(string)
         if above:
@@ -676,7 +686,7 @@ class textui(backend.Backend):
                 return -1
             try:
                 selection = int(resp) - 1
-                if (selection >= 0 and selection < counter):
+                if (counter > selection >= 0):
                     break
             except Exception:
                 # fall through to the error msg
@@ -692,7 +702,7 @@ class help(frontend.Local):
     """
     Display help for a command or topic.
     """
-    class Writer(object):
+    class Writer:
         """
         Writer abstraction
         """
@@ -711,9 +721,11 @@ class help(frontend.Local):
             self.buffer.append(unicode(string))
 
         def write(self):
-            if self.buffer_length > get_terminal_height():
+            pager = get_pager()
+
+            if pager and self.buffer_length > get_terminal_height():
                 data = "\n".join(self.buffer).encode("utf-8")
-                open_in_pager(data)
+                open_in_pager(data, pager)
             else:
                 try:
                     for line in self.buffer:
@@ -949,22 +961,61 @@ class console(frontend.Command):
 
     topic = None
 
+    def _setup_tab_completion(self, local):
+        readline.parse_and_bind("tab: complete")
+        # completer with custom locals
+        readline.set_completer(rlcompleter.Completer(local).complete)
+        # load history
+        history = os.path.join(api.env.dot_ipa, "console.history")
+        try:
+            readline.read_history_file(history)
+        except OSError:
+            pass
+
+        def save_history():
+            directory = os.path.dirname(history)
+            if not os.path.isdir(directory):
+                os.makedirs(directory)
+            readline.set_history_length(50)
+            try:
+                readline.write_history_file(history)
+            except OSError:
+                logger.exception("Unable to store history %s", history)
+
+        atexit.register(save_history)
+
     def run(self, filename=None, **options):
-        local = dict(api=self.api)
+        local = dict(
+            api=self.api,
+            pp=pprint.pprint,  # just too convenient
+            __builtins__=builtins,
+        )
         if filename:
             try:
-                script = open(filename)
+                with open(filename) as f:
+                    source = f.read()
             except IOError as e:
                 sys.exit("%s: %s" % (e.filename, e.strerror))
             try:
-                with script:
-                    exec(script, globals(), local)
+                compiled = compile(
+                    source,
+                    filename,
+                    'exec',
+                    flags=print_function.compiler_flag
+                )
+                exec(compiled, globals(), local)
             except Exception:
                 traceback.print_exc()
                 sys.exit(1)
         else:
+            if readline is not None:
+                self._setup_tab_completion(local)
             code.interact(
-                '(Custom IPA interactive Python console)',
+                "\n".join((
+                    "(Custom IPA interactive Python console)",
+                    "    api: IPA API object",
+                    "    pp: pretty printer",
+                )),
                 local=local
             )
 
@@ -1031,7 +1082,7 @@ cli_application_commands = (
 )
 
 
-class Collector(object):
+class Collector:
     def __init__(self):
         object.__setattr__(self, '_Collector__options', {})
 
@@ -1333,7 +1384,7 @@ class cli(backend.Executioner):
         3) the webUI will use a different way of loading files
         """
         for p in cmd.params():
-            if isinstance(p, File):
+            if isinstance(p, (File, BinaryFile)):
                 # FIXME: this only reads the first file
                 raw = None
                 if p.name in kw:
@@ -1342,9 +1393,8 @@ class cli(backend.Executioner):
                     else:
                         fname = kw[p.name]
                     try:
-                        f = open(fname, 'r')
-                        raw = f.read()
-                        f.close()
+                        with open(fname, p.open_mode) as f:
+                            raw = f.read()
                     except IOError as e:
                         raise ValidationError(
                             name=to_cli(p.cli_name),
@@ -1352,14 +1402,22 @@ class cli(backend.Executioner):
                         )
                 elif p.stdin_if_missing:
                     try:
-                        raw = sys.stdin.read()
+                        if six.PY3 and p.type is bytes:
+                            # pylint: disable=no-member
+                            raw = sys.stdin.buffer.read()
+                            # pylint: enable=no-member
+                        else:
+                            raw = sys.stdin.read()
                     except IOError as e:
                         raise ValidationError(
                             name=to_cli(p.cli_name), error=e.args[1]
                         )
 
                 if raw:
-                    kw[p.name] = self.Backend.textui.decode(raw)
+                    if p.type is bytes:
+                        kw[p.name] = raw
+                    else:
+                        kw[p.name] = self.Backend.textui.decode(raw)
                 elif p.required:
                     raise ValidationError(
                         name=to_cli(p.cli_name), error=_('No file to read')
@@ -1396,7 +1454,7 @@ def run(api):
         (_options, argv) = api.bootstrap_with_global_options(context='cli')
 
         try:
-            check_client_configuration()
+            check_client_configuration(env=api.env)
         except ScriptError as e:
             sys.exit(e)
 

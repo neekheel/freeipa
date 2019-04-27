@@ -21,12 +21,19 @@
 """
 Test the `ipapython/ipautil.py` module.
 """
+from __future__ import absolute_import
+
+import os
+import pwd
+import socket
 import sys
 import tempfile
+import textwrap
 
 import pytest
 import six
 
+from ipalib.constants import IPAAPI_USER
 from ipaplatform.paths import paths
 from ipapython import ipautil
 
@@ -78,7 +85,7 @@ def test_ip_address(addr, words, prefixlen):
         assert ip.prefixlen == prefixlen
 
 
-class TestCIDict(object):
+class TestCIDict:
     def setup(self):
         self.cidict = ipautil.CIDict()
         self.cidict["Key1"] = "val1"
@@ -176,7 +183,8 @@ class TestCIDict(object):
         assert ("Key1", "val1") in items_set
         assert ("key2", "val2") in items_set
         assert ("KEY3", "VAL3") in items_set
-
+        # pylint: disable=dict-iter-method
+        # pylint: disable=dict-keys-not-iterating, dict-values-not-iterating
         assert list(self.cidict.items()) == list(self.cidict.iteritems()) == list(zip(
             self.cidict.keys(), self.cidict.values()))
 
@@ -186,8 +194,9 @@ class TestCIDict(object):
 
     def test_iteritems(self):
         items = []
-        for (k,v) in self.cidict.iteritems():
-            items.append((k,v))
+        # pylint: disable=dict-iter-method
+        for k, v in self.cidict.iteritems():
+            items.append((k, v))
         assert_equal(3, len(items))
         items_set = set(items)
         assert ("Key1", "val1") in items_set
@@ -196,6 +205,7 @@ class TestCIDict(object):
 
     def test_iterkeys(self):
         keys = []
+        # pylint: disable=dict-iter-method
         for k in self.cidict.iterkeys():
             keys.append(k)
         assert_equal(3, len(keys))
@@ -206,6 +216,7 @@ class TestCIDict(object):
 
     def test_itervalues(self):
         values = []
+        # pylint: disable=dict-iter-method
         for k in self.cidict.itervalues():
             values.append(k)
         assert_equal(3, len(values))
@@ -221,7 +232,7 @@ class TestCIDict(object):
         assert "Key1" in keys_set
         assert "key2" in keys_set
         assert "KEY3" in keys_set
-
+        # pylint: disable=dict-iter-method
         assert list(self.cidict.keys()) == list(self.cidict.iterkeys())
 
     def test_values(self):
@@ -231,7 +242,7 @@ class TestCIDict(object):
         assert "val1" in values_set
         assert "val2" in values_set
         assert "VAL3" in values_set
-
+        # pylint: disable=dict-iter-method
         assert list(self.cidict.values()) == list(self.cidict.itervalues())
 
     def test_update(self):
@@ -327,7 +338,7 @@ class TestCIDict(object):
         assert list(dct.values()) == [None] * 3
 
 
-class TestTimeParser(object):
+class TestTimeParser:
     def test_simple(self):
         timestr = "20070803"
 
@@ -508,3 +519,91 @@ def test_run_stderr():
     assert "message" not in str(cm.value)
     assert "message" not in str(cm.value.output)
     assert "message" not in str(cm.value.stderr)
+
+
+@pytest.mark.skipif(os.geteuid() != 0,
+                    reason="Must have root privileges to run this test")
+def test_run_runas():
+    """
+    Test run method with the runas parameter.
+    The test executes 'id' to make sure that the process is
+    executed with the user identity specified in runas parameter.
+    The test is using 'ipaapi' user as it is configured when
+    ipa-server-common package is installed.
+    """
+    user = pwd.getpwnam(IPAAPI_USER)
+    res = ipautil.run(['/usr/bin/id', '-u'], runas=IPAAPI_USER)
+    assert res.returncode == 0
+    assert res.raw_output == b'%d\n' % user.pw_uid
+
+    res = ipautil.run(['/usr/bin/id', '-g'], runas=IPAAPI_USER)
+    assert res.returncode == 0
+    assert res.raw_output == b'%d\n' % user.pw_gid
+
+
+@pytest.fixture(scope='function')
+def tcp_listen():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        # port 0 means the OS selects a random, unused port for the test.
+        s.bind(('', 0))
+        s.listen(1)
+        yield s.getsockname()[-1], s
+    finally:
+        s.close()
+
+
+@pytest.fixture(scope='function')
+def udp_listen():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # port 0 means the OS selects a random, unused port for the test.
+        s.bind(('', 0))
+        yield s.getsockname()[-1], s
+    finally:
+        s.close()
+
+
+def test_check_port_bindable_tcp(tcp_listen):
+    port, sock = tcp_listen
+    assert not ipautil.check_port_bindable(port)
+    assert not ipautil.check_port_bindable(port, socket.SOCK_STREAM)
+    sock.close()
+    assert ipautil.check_port_bindable(port)
+
+
+def test_check_port_bindable_udp(udp_listen):
+    port, sock = udp_listen
+    assert not ipautil.check_port_bindable(port, socket.SOCK_DGRAM)
+    sock.close()
+    assert ipautil.check_port_bindable(port, socket.SOCK_DGRAM)
+
+
+def test_config_replace_variables(tempdir):
+    conffile = os.path.join(tempdir, 'test.conf')
+
+    conf = textwrap.dedent("""
+    replaced=foo
+    removed=gone
+    """)
+    expected = textwrap.dedent("""
+    replaced=bar
+    addreplaced=baz
+    """)
+
+    with open(conffile, 'w') as f:
+        f.write(conf)
+
+    result = ipautil.config_replace_variables(
+        conffile,
+        replacevars=dict(replaced="bar", addreplaced="baz"),
+        removevars={'removed'}
+    )
+    assert result == {
+        'removed': 'gone', 'replaced': 'foo'
+    }
+
+    with open(conffile, 'r') as f:
+        newconf = f.read()
+    assert newconf == expected

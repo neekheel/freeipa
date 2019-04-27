@@ -1,5 +1,3 @@
-#!/usr/bin/python3
-
 # Authors:
 #   Jason Gerard DeRose <jderose@redhat.com>
 #
@@ -41,6 +39,7 @@ if __name__ == '__main__':
             'ipaserver.dnssec',
             'ipaserver.plugins',
             'ipaserver.secrets',
+            'ipaserver.secrets.handlers',
             'ipaserver.install',
             'ipaserver.install.plugins',
             'ipaserver.install.server',
@@ -50,7 +49,9 @@ if __name__ == '__main__':
             "custodia",
             "dbus-python",
             "dnspython",
-            "dogtag-pki",
+            # dogtag-pki is just the client package on PyPI. ipaserver
+            # requires the full pki package.
+            # "dogtag-pki",
             "ipaclient",
             "ipalib",
             "ipaplatform",

@@ -27,6 +27,8 @@ Backend plugin for LDAP.
 # binding encodes them into the appropriate representation. This applies to
 # everything except the CrudBackend methods, where dn is part of the entry dict.
 
+from __future__ import absolute_import
+
 import logging
 import os
 
@@ -417,7 +419,8 @@ class ldap2(CrudBackend, LDAPClient):
                 modlist = [(a, b, self.encode(c))
                            for a, b, c in modlist]
                 self.conn.modify_s(str(group_dn), modlist)
-        except errors.DatabaseError:
+        except errors.DuplicateEntry:
+            # TYPE_OR_VALUE_EXISTS
             raise errors.AlreadyGroupMember()
 
     def remove_entry_from_group(self, dn, group_dn, member_attr='member'):

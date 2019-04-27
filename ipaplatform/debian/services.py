@@ -6,6 +6,8 @@
 Contains Debian-specific service class implementations.
 """
 
+from __future__ import absolute_import
+
 from ipaplatform.base import services as base_services
 from ipaplatform.redhat import services as redhat_services
 from ipapython import ipautil
@@ -151,8 +153,8 @@ def debian_service_class_factory(name, api=None):
         return DebianNoService(name, api)
     if name == 'ipa':
         return redhat_services.RedHatIPAService(name, api)
-    if name == 'messagebus':
-        return DebianNoService(name, api)
+    if name in ('pki-tomcatd', 'pki_tomcatd'):
+        return redhat_services.RedHatCAService(name, api)
     if name == 'ntpd':
         return DebianSysvService("ntp", api)
     return DebianService(name, api)

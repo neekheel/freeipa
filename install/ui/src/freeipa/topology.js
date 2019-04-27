@@ -170,6 +170,7 @@ return {
         }
     ],
     adder_dialog: {
+        title: '@i18n:objects.topologysegment.add',
         fields: [
             {
                 name: 'cn',
@@ -190,6 +191,9 @@ return {
                 z_index: 1
             }
         ]
+    },
+    deleter_dialog: {
+        title: '@i18n:objects.topologysegment.remove'
     }
 };};
 
@@ -445,7 +449,9 @@ return {
                                 {
                                     name: 'service_relative_weight'
                                 }
-                            ]
+                            ],
+                            add_title: '@i18n:objects.topologylocation.add_server',
+                            remove_title: '@i18n:objects.topologylocation.remove_servers'
                         }
                     ]
                 }
@@ -453,6 +459,7 @@ return {
         }
     ],
     adder_dialog: {
+        title: '@i18n:objects.topologylocation.add',
         fields: [
             {
                 $type: 'text',
@@ -461,6 +468,9 @@ return {
             },
             'description'
         ]
+    },
+    deleter_dialog: {
+        title: '@i18n:objects.topologylocation.remove'
     }
 };};
 
@@ -706,14 +716,10 @@ topology.location_association_table_widget = function(spec) {
 
     that.create_add_dialog = function() {
 
-        var entity_label = that.entity.metadata.label_singular;
         var pkey = that.facet.get_pkey();
-        var other_entity_label = that.other_entity.metadata.label_singular;
 
         var title = that.add_title;
-        title = title.replace('${entity}', entity_label);
         title = title.replace('${primary_key}', pkey);
-        title = title.replace('${other_entity}', other_entity_label);
 
         return topology.location_server_adder_dialog({
             title: title,
@@ -1008,10 +1014,7 @@ topology.create_add_dialog = function(spec) {
 
     spec.entity = spec.entity || 'topologysegment';
 
-    var entity = reg.entity.get('topologysegment');
-    var title = text.get('@i18n:dialogs.add_title');
-    var label = entity.metadata.label_singular;
-    spec.title = title.replace('${entity}', label);
+    spec.title = text.get('@i18n:objects.topologysegment.add');
 
     spec.fields = spec.fields || [
         {
@@ -1374,6 +1377,33 @@ topology.TopologyGraphWidget = declare([Stateful, Evented], {
         return deferred.promise;
     },
 
+    _find_common_domain: function(nodes) {
+        if (nodes.length < 2) {
+            return '';
+        }
+
+        var common_labels = null;
+
+        for (var i=0, l=nodes.length; i<l; i++) {
+            var node = nodes[i];
+            var labels = node.id.split('.').reverse();
+
+            if (common_labels === null) {
+                common_labels = labels;
+                continue;
+            }
+
+            for (var j=0; j<common_labels.length; j++) {
+                if (labels[j] !== common_labels[j]) {
+                    common_labels = common_labels.slice(0, j);
+                    break;
+                }
+            }
+        }
+
+        return common_labels.reverse().join('.');
+    },
+
     /**
      * @param {Object} size - dict contains height and width value. (optional)
      */
@@ -1383,6 +1413,43 @@ topology.TopologyGraphWidget = declare([Stateful, Evented], {
         if (IPA.domain_level < topology.required_domain_level) return;
 
         when(this._get_data()).then(function(data) {
+            // remove common domain labels from node FQDN
+            // Example #1:
+            //   nodes:
+            //    - master.ipa.example.com
+            //    - replica.ipa.example.com
+            //   common domain: ipa.example.com
+            //   captions: master, replica
+            //
+            // Example #2:
+            //   nodes:
+            //    - master.net1.example.com
+            //    - replica.net1.example.com
+            //    - replica.net2.example.com
+            //   common domain: example.com
+            //   captions: master.net1, replica.net1, replica.net2
+            //
+            var common_domain = this._find_common_domain(data.nodes);
+
+            if (this.parent) {
+                var title = this.parent.title;
+                if (common_domain) {
+                    title += ' (' + common_domain + ')';
+                }
+                this.parent.header.title_widget.update({text: title});
+            }
+
+            for (var i=0,l=data.nodes.length; i<l; i++) {
+                var node = data.nodes[i];
+                if (l > 1 && common_domain.length > 0) {
+                    node.caption = node.id.substring(
+                        0, node.id.length - common_domain.length - 1
+                    );
+                } else {
+                    node.caption = node.id;
+                }
+            }
+
             if (!this.graph) {
                 this.graph = new topology_graph.TopoGraph({
                     nodes: data.nodes,

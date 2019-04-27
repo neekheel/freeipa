@@ -10,6 +10,7 @@ from ipalib import errors
 from ipalib import output
 from ipalib.parameters import Int
 from ipalib.plugable import Registry
+from ipalib.constants import DOMAIN_LEVEL_0, MIN_DOMAIN_LEVEL
 
 from ipapython.dn import DN
 
@@ -45,7 +46,7 @@ def get_domainlevel_range(master_entry):
             int(master_entry['ipaMaxDomainLevel'][0])
         )
     except KeyError:
-        return DomainLevelRange(0, 0)
+        return DomainLevelRange(DOMAIN_LEVEL_0, DOMAIN_LEVEL_0)
 
 
 def check_conflict_entries(ldap, api, desired_value):
@@ -67,30 +68,23 @@ def check_conflict_entries(ldap, api, desired_value):
             scope=ldap.SCOPE_SUBTREE)
         message = _("Domain Level cannot be raised to {0}, "
                     "existing replication conflicts have to be resolved."
-                    .format(desired_value))
+                    ).format(desired_value)
         raise errors.InvalidDomainLevelError(reason=message)
     except errors.NotFound:
         pass
+
 
 def get_master_entries(ldap, api):
     """
     Returns list of LDAPEntries representing IPA masters.
     """
-
-    container_masters = DN(
-        ('cn', 'masters'),
-        ('cn', 'ipa'),
-        ('cn', 'etc'),
-        api.env.basedn
-    )
-
+    dn = DN(api.env.container_masters, api.env.basedn)
     masters, _dummy = ldap.find_entries(
         filter="(cn=*)",
-        base_dn=container_masters,
+        base_dn=dn,
         scope=ldap.SCOPE_ONELEVEL,
         paged_search=True,  # we need to make sure to get all of them
     )
-
     return masters
 
 
@@ -102,12 +96,20 @@ class domainlevel_get(Command):
 
     def execute(self, *args, **options):
         ldap = self.api.Backend.ldap2
-        entry = ldap.get_entry(
+        entry = ldap.get_entries(
             get_domainlevel_dn(self.api),
-            ['ipaDomainLevel']
-        )
+            scope=ldap.SCOPE_BASE,
+            filter='(objectclass=ipadomainlevelconfig)',
+            attrs_list=['ipaDomainLevel']
+        )[0]
 
-        return {'result': int(entry.single_value['ipaDomainLevel'])}
+        try:
+            value = int(entry.single_value['ipaDomainLevel'])
+            return {'result': value}
+        except KeyError:
+            raise errors.NotFound(
+                reason=_(
+                    'Server does not support domain level functionality'))
 
 
 @register()
@@ -120,7 +122,7 @@ class domainlevel_set(Command):
         Int('ipadomainlevel',
             cli_name='level',
             label=_('Domain Level'),
-            minvalue=0,
+            minvalue=MIN_DOMAIN_LEVEL,
         ),
     )
 
@@ -152,7 +154,7 @@ class domainlevel_set(Command):
             if supported.min > desired_value or supported.max < desired_value:
                 message = _("Domain Level cannot be raised to {0}, server {1} "
                             "does not support it."
-                            .format(desired_value, master['cn'][0]))
+                            ).format(desired_value, master['cn'][0])
                 raise errors.InvalidDomainLevelError(reason=message)
 
         # Check if conflict entries exist in topology subtree

@@ -2,8 +2,11 @@
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import six
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
+from ipatests.pytest_ipa.integration.firewall import Firewall
 from ipatests.test_integration.base import IntegrationTest
 from ipaplatform.paths import paths
 
@@ -15,31 +18,26 @@ if six.PY3:
 class TestHttpKdcProxy(IntegrationTest):
     topology = "line"
     num_clients = 1
+    # Firewall rules without --append/-A, --delete/-D, .. First entry of
+    # each rule is the chain name, the argument to add or delete the rule
+    # will be added by the used Firewall method. See firewall.py for more
+    # information.
+    fw_rules = [['OUTPUT', '-p', 'tcp', '--dport', '88', '-j', 'DROP'],
+                ['OUTPUT', '-p', 'udp', '--dport', '88', '-j', 'DROP']]
 
     @classmethod
     def install(cls, mh):
         super(TestHttpKdcProxy, cls).install(mh)
         # Block access from client to master's port 88
-        cls.clients[0].run_command([
-            'iptables', '-A', 'OUTPUT', '-p', 'tcp',
-            '--dport', '88', '-j', 'DROP'])
-        cls.clients[0].run_command([
-            'iptables', '-A', 'OUTPUT', '-p', 'udp',
-            '--dport', '88', '-j', 'DROP'])
-        cls.clients[0].run_command([
-            'ip6tables', '-A', 'OUTPUT', '-p', 'tcp',
-            '--dport', '88', '-j', 'DROP'])
-        cls.clients[0].run_command([
-            'ip6tables', '-A', 'OUTPUT', '-p', 'udp',
-            '--dport', '88', '-j', 'DROP'])
+        Firewall(cls.clients[0]).prepend_passthrough_rules(cls.fw_rules)
         # configure client
         cls.clients[0].run_command(
-            "sed -i 's/ kdc = .*$/ kdc = https:\/\/%s\/KdcProxy/' %s" % (
+            r"sed -i 's/ kdc = .*$/ kdc = https:\/\/%s\/KdcProxy/' %s" % (
                 cls.master.hostname, paths.KRB5_CONF)
             )
         cls.clients[0].run_command(
-            "sed -i 's/master_kdc = .*$/master_kdc"
-            " = https:\/\/%s\/KdcProxy/' %s" % (
+            r"sed -i 's/master_kdc = .*$/master_kdc"
+            r" = https:\/\/%s\/KdcProxy/' %s" % (
                 cls.master.hostname, paths.KRB5_CONF)
             )
         # Workaround for https://fedorahosted.org/freeipa/ticket/6443
@@ -49,7 +47,7 @@ class TestHttpKdcProxy(IntegrationTest):
     @classmethod
     def uninstall(cls, mh):
         super(TestHttpKdcProxy, cls).uninstall(mh)
-        cls.clients[0].run_command(['iptables', '-F'])
+        Firewall(cls.clients[0]).remove_passthrough_rules(cls.fw_rules)
 
     def test_http_kdc_proxy_works(self):
         result = tasks.kinit_admin(self.clients[0], raiseonerr=False)

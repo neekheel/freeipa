@@ -21,6 +21,8 @@
 Common utility functions and classes for unit tests.
 """
 
+from __future__ import absolute_import
+
 import inspect
 import os
 from os import path
@@ -33,18 +35,13 @@ from contextlib import contextmanager
 from pprint import pformat
 
 import six
-import ldap
-import ldap.sasl
-import ldap.modlist
 
 import ipalib
 from ipalib import api
 from ipalib.plugable import Plugin
 from ipalib.request import context
 from ipapython.dn import DN
-from ipapython.ipaldap import ldap_initialize
 from ipapython.ipautil import run
-
 
 try:
     # not available with client-only wheel packages
@@ -58,6 +55,15 @@ try:
 except ImportError:
     paths = None
 
+try:
+    # not available with optional python-ldap
+    import ldap
+except ImportError:
+    pass
+else:
+    import ldap.sasl
+    import ldap.modlist
+    from ipapython.ipaldap import ldap_initialize
 
 if six.PY3:
     unicode = str
@@ -69,7 +75,8 @@ PYTEST_VERSION = tuple(int(v) for v in pytest.__version__.split('.'))
 def check_ipaclient_unittests(reason="Skip in ipaclient unittest mode"):
     """Call this in a package to skip the package in ipaclient-unittest mode
     """
-    if pytest.config.getoption('ipaclient_unittests', False):
+    config = pytest.config  # pylint: disable=no-member
+    if config.getoption('ipaclient_unittests', False):
         if PYTEST_VERSION[0] >= 3:
             # pytest 3+ does no longer allow pytest.skip() on module level
             # pylint: disable=unexpected-keyword-arg
@@ -82,7 +89,8 @@ def check_ipaclient_unittests(reason="Skip in ipaclient unittest mode"):
 def check_no_ipaapi(reason="Skip tests that needs an IPA API"):
     """Call this in a package to skip the package in no-ipaapi mode
     """
-    if pytest.config.getoption('skip_ipaapi', False):
+    config = pytest.config  # pylint: disable=no-member
+    if config.getoption('skip_ipaapi', False):
         if PYTEST_VERSION[0] >= 3:
             # pylint: disable=unexpected-keyword-arg
             raise pytest.skip.Exception(reason, allow_module_level=True)
@@ -91,7 +99,7 @@ def check_no_ipaapi(reason="Skip tests that needs an IPA API"):
             raise pytest.skip(reason)
 
 
-class TempDir(object):
+class TempDir:
     def __init__(self):
         self.__path = tempfile.mkdtemp(prefix='ipa.tests.')
         assert self.path == self.__path
@@ -181,7 +189,7 @@ def assert_not_equal(val1, val2):
     assert val1 != val2, '%r == %r' % (val1, val2)
 
 
-class Fuzzy(object):
+class Fuzzy:
     """
     Perform a fuzzy (non-strict) equality tests.
 
@@ -201,14 +209,14 @@ class Fuzzy(object):
     The first optional argument *regex* is a regular expression pattern to
     match.  For example, you could match a phone number like this:
 
-    >>> phone = Fuzzy('^\d{3}-\d{3}-\d{4}$')
+    >>> phone = Fuzzy(r'^\d{3}-\d{3}-\d{4}$')
     >>> u'123-456-7890' == phone
     True
 
     Use of a regular expression by default implies the ``unicode`` type, so
     comparing with an ``str`` instance will evaluate to ``False``:
 
-    >>> phone.type is six.text_type
+    >>> phone.type is str
     True
     >>> b'123-456-7890' == phone
     False
@@ -216,7 +224,7 @@ class Fuzzy(object):
     The *type* kwarg allows you to specify a type constraint, so you can force
     the above to work on ``str`` instances instead:
 
-    >>> '123-456-7890' == Fuzzy('^\d{3}-\d{3}-\d{4}$', type=str)
+    >>> '123-456-7890' == Fuzzy(r'^\d{3}-\d{3}-\d{4}$', type=str)
     True
 
     You can also use the *type* constraint on its own without the *regex*, for
@@ -264,7 +272,7 @@ class Fuzzy(object):
     __hash__ = None
 
     def __init__(self, regex=None, type=None, test=None):
-        """
+        r"""
         Initialize.
 
         :param regex: A regular expression pattern to match, e.g.
@@ -276,7 +284,7 @@ class Fuzzy(object):
         :param test: A callable used to perform equality test, e.g.
             ``lambda other: other >= 18``
         """
-        assert regex is None or isinstance(regex, six.string_types)
+        assert regex is None or isinstance(regex, str)
         assert test is None or callable(test)
         if regex is None:
             self.re = None
@@ -284,7 +292,7 @@ class Fuzzy(object):
             self.re = re.compile(regex)
             if type is None:
                 type = unicode
-            assert type in (unicode, bytes, six.string_types)
+            assert type in (unicode, bytes, str)
         self.regex = regex
         self.type = type
         self.test = test
@@ -396,7 +404,7 @@ def assert_deepequal(expected, got, doc='', stack=tuple()):
     if isinstance(got, tuple):
         got = list(got)
     if isinstance(expected, DN):
-        if isinstance(got, six.string_types):
+        if isinstance(got, str):
             got = DN(got)
     if (
         not (isinstance(expected, Fuzzy)
@@ -519,7 +527,7 @@ def is_prop(prop):
     return type(prop) is property
 
 
-class ClassChecker(object):
+class ClassChecker:
     __cls = None
     __subcls = None
 
@@ -580,7 +588,7 @@ def create_test_api(**kw):
     return (api, home)
 
 
-class PluginTester(object):
+class PluginTester:
     __plugin = None
 
     def __get_plugin(self):
@@ -591,7 +599,7 @@ class PluginTester(object):
     plugin = property(__get_plugin)
 
     def register(self, *plugins, **kw):
-        """
+        r"""
         Create a testing api and register ``self.plugin``.
 
         This method returns an (api, home) tuple.
@@ -622,7 +630,7 @@ class PluginTester(object):
         context.__dict__.clear()
 
 
-class dummy_ugettext(object):
+class dummy_ugettext:
     __called = False
 
     def __init__(self, translation=None):
@@ -651,7 +659,7 @@ class dummy_ugettext(object):
         self.__called = False
 
 
-class dummy_ungettext(object):
+class dummy_ungettext:
     __called = False
 
     def __init__(self):
@@ -672,7 +680,7 @@ class dummy_ungettext(object):
         return self.translation_plural
 
 
-class DummyMethod(object):
+class DummyMethod:
     def __init__(self, callback, name):
         self.__callback = callback
         self.__name = name
@@ -681,7 +689,7 @@ class DummyMethod(object):
         return self.__callback(self.__name, args, kw)
 
 
-class DummyClass(object):
+class DummyClass:
     def __init__(self, *calls):
         self.__calls = calls
         self.__i = 0
@@ -725,7 +733,7 @@ class DummyClass(object):
         return self.__i == len(self.__calls)
 
 
-class MockLDAP(object):
+class MockLDAP:
     def __init__(self):
         self.connection = ldap_initialize(
             'ldap://{host}'.format(host=ipalib.api.env.host)
@@ -857,7 +865,8 @@ def get_entity_keytab(principal, options=None):
 
         yield keytab_filename
     finally:
-        os.remove(keytab_filename)
+        if os.path.isfile(keytab_filename):
+            os.remove(keytab_filename)
 
 
 @contextmanager

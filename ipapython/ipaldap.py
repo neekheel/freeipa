@@ -20,37 +20,45 @@
 #
 
 import binascii
+import errno
 import logging
 import time
 import datetime
 from decimal import Decimal
 from copy import deepcopy
 import contextlib
-import collections
 import os
 import pwd
 import warnings
 
-# pylint: disable=import-error
-from six.moves.urllib.parse import urlparse
-# pylint: enable=import-error
-
 from cryptography import x509 as crypto_x509
+from cryptography.hazmat.primitives import serialization
 
 import ldap
 import ldap.sasl
 import ldap.filter
 from ldap.controls import SimplePagedResultsControl, GetEffectiveRightsControl
+import ldapurl
 import six
 
 # pylint: disable=ipa-forbidden-import
 from ipalib import errors, x509, _
-from ipalib.constants import LDAP_GENERALIZED_TIME_FORMAT
+from ipalib.constants import (
+    LDAP_GENERALIZED_TIME_FORMAT, LDAP_SSF_MIN_THRESHOLD
+)
 # pylint: enable=ipa-forbidden-import
+from ipaplatform.paths import paths
 from ipapython.ipautil import format_netloc, CIDict
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
 from ipapython.kerberos import Principal
+
+# pylint: disable=no-name-in-module, import-error
+if six.PY3:
+    from collections.abc import MutableMapping
+else:
+    from collections import MutableMapping
+# pylint: enable=no-name-in-module, import-error
 
 if six.PY3:
     unicode = str
@@ -85,35 +93,64 @@ if six.PY2 and hasattr(ldap, 'LDAPBytesWarning'):
     )
 
 
-def ldap_initialize(uri, cacertfile=None):
+def realm_to_serverid(realm_name):
+    """Convert Kerberos realm name to 389-DS server id"""
+    return "-".join(realm_name.split("."))
+
+
+def realm_to_ldapi_uri(realm_name):
+    """Get ldapi:// URI to 389-DS's Unix socket"""
+    serverid = realm_to_serverid(realm_name)
+    socketname = paths.SLAPD_INSTANCE_SOCKET_TEMPLATE % (serverid,)
+    return 'ldapi://' + ldapurl.ldapUrlEscape(socketname)
+
+
+def ldap_initialize(uri, cacertfile=None,
+                    ssf_min_threshold=LDAP_SSF_MIN_THRESHOLD):
     """Wrapper around ldap.initialize()
+
+    The function undoes global and local ldap.conf settings that may cause
+    issues or reduce security:
+
+    * Canonization of SASL host names is disabled.
+    * With cacertfile=None, the connection uses OpenSSL's default verify
+      locations, also known as system-wide trust store.
+    * Cert validation is enforced.
+    * SSLv2 and SSLv3 are disabled.
+    * Require a minimum SASL security factor of 56. That level ensures
+      data integrity and confidentiality. Although at least AES128 is
+      enforced pretty much everywhere, 56 is required for backwards
+      compatibility with systems that announce wrong SSF.
     """
     conn = ldap.initialize(uri)
 
+    # Do not perform reverse DNS lookups to canonicalize SASL host names
+    conn.set_option(ldap.OPT_X_SASL_NOCANON, ldap.OPT_ON)
+
     if not uri.startswith('ldapi://'):
+        # require a minimum SSF for TCP connections, but don't lower SSF_MIN
+        # if the current value is already larger.
+        cur_min_ssf = conn.get_option(ldap.OPT_X_SASL_SSF_MIN)
+        if cur_min_ssf < ssf_min_threshold:
+            conn.set_option(ldap.OPT_X_SASL_SSF_MIN, ssf_min_threshold)
+
         if cacertfile:
+            if not os.path.isfile(cacertfile):
+                raise IOError(errno.ENOENT, cacertfile)
             conn.set_option(ldap.OPT_X_TLS_CACERTFILE, cacertfile)
-            newctx = True
-        else:
-            newctx = False
 
-        req_cert = conn.get_option(ldap.OPT_X_TLS_REQUIRE_CERT)
-        if req_cert != ldap.OPT_X_TLS_DEMAND:
-            # libldap defaults to cert validation, but the default can be
-            # overridden in global or user local ldap.conf.
-            conn.set_option(
-                ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_DEMAND
-            )
-            newctx = True
-
-        # reinitialize TLS context
-        if newctx:
-            conn.set_option(ldap.OPT_X_TLS_NEWCTX, 0)
+        # SSLv3 and SSLv2 are insecure
+        conn.set_option(ldap.OPT_X_TLS_PROTOCOL_MIN, 0x301)  # TLS 1.0
+        # libldap defaults to cert validation, but the default can be
+        # overridden in global or user local ldap.conf.
+        conn.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_DEMAND)
+        # reinitialize TLS context to materialize settings
+        conn.set_option(ldap.OPT_X_TLS_NEWCTX, 0)
 
     return conn
 
 
-class _ServerSchema(object):
+class _ServerSchema:
     '''
     Properties of a schema retrieved from an LDAP server.
     '''
@@ -124,7 +161,7 @@ class _ServerSchema(object):
         self.retrieve_timestamp = time.time()
 
 
-class SchemaCache(object):
+class SchemaCache:
     '''
     Cache the schema's from individual LDAP servers.
     '''
@@ -195,18 +232,17 @@ class SchemaCache(object):
             info = e.args[0].get('info', '').strip()
             raise errors.DatabaseError(desc = u'uri=%s' % url,
                                 info = u'Unable to retrieve LDAP schema: %s: %s' % (desc, info))
-        except IndexError:
-            # no 'cn=schema' entry in LDAP? some servers use 'cn=subschema'
-            # TODO: DS uses 'cn=schema', support for other server?
-            #       raise a more appropriate exception
-            raise
+
+        # no 'cn=schema' entry in LDAP? some servers use 'cn=subschema'
+        # TODO: DS uses 'cn=schema', support for other server?
+        #       raise a more appropriate exception
 
         return ldap.schema.SubSchema(schema_entry[1])
 
 schema_cache = SchemaCache()
 
 
-class LDAPEntry(collections.MutableMapping):
+class LDAPEntry(MutableMapping):
     __slots__ = ('_conn', '_dn', '_names', '_nice', '_raw', '_sync',
                  '_not_list', '_orig_raw', '_raw_view',
                  '_single_value_view')
@@ -360,7 +396,7 @@ class LDAPEntry(collections.MutableMapping):
             self._not_list.discard(name)
 
     def _attr_name(self, name):
-        if not isinstance(name, six.string_types):
+        if not isinstance(name, str):
             raise TypeError(
                 "attribute name must be unicode or str, got %s object %r" % (
                     name.__class__.__name__, name))
@@ -553,10 +589,13 @@ class LDAPEntry(collections.MutableMapping):
                     raise errors.OnlyOneValueAllowed(attr=name)
                 modlist.append((ldap.MOD_REPLACE, name, adds))
             else:
-                if adds:
-                    modlist.append((ldap.MOD_ADD, name, adds))
+                # dels before adds, in case the same value occurs in
+                # both due to encoding differences
+                # (https://pagure.io/freeipa/issue/7750)
                 if dels:
                     modlist.append((ldap.MOD_DELETE, name, dels))
+                if adds:
+                    modlist.append((ldap.MOD_ADD, name, adds))
 
         # Usually the modlist order does not matter.
         # However, for schema updates, we want 'attributetypes' before
@@ -570,7 +609,7 @@ class LDAPEntry(collections.MutableMapping):
         return iter(self._nice)
 
 
-class LDAPEntryView(collections.MutableMapping):
+class LDAPEntryView(MutableMapping):
     __slots__ = ('_entry',)
 
     def __init__(self, entry):
@@ -623,7 +662,7 @@ class SingleValueLDAPEntryView(LDAPEntryView):
             self._entry[name] = [value]
 
 
-class LDAPClient(object):
+class LDAPClient:
     """LDAP backend class
 
     This class abstracts a LDAP connection, providing methods that work with
@@ -733,7 +772,7 @@ class LDAPClient(object):
 
     def __init__(self, ldap_uri, start_tls=False, force_schema_updates=False,
                  no_schema=False, decode_attrs=True, cacert=None,
-                 sasl_nocanon=False):
+                 sasl_nocanon=True):
         """Create LDAPClient object.
 
         :param ldap_uri: The LDAP URI to connect to
@@ -751,15 +790,9 @@ class LDAPClient(object):
             syntax.
         """
         if ldap_uri is not None:
+            # special case for ldap2 server plugin
             self.ldap_uri = ldap_uri
-            self.host = 'localhost'
-            self.port = None
-            url_data = urlparse(ldap_uri)
-            self._protocol = url_data.scheme
-            if self._protocol in ('ldap', 'ldaps'):
-                self.host = url_data.hostname
-                self.port = url_data.port
-
+            assert self.protocol in {'ldaps', 'ldapi', 'ldap'}
         self._start_tls = start_tls
         self._force_schema_updates = force_schema_updates
         self._no_schema = no_schema
@@ -770,7 +803,50 @@ class LDAPClient(object):
         self._has_schema = False
         self._schema = None
 
-        self._conn = self._connect()
+        if ldap_uri is not None:
+            self._conn = self._connect()
+
+    @classmethod
+    def from_realm(cls, realm_name, **kwargs):
+        """Create a LDAPI connection to local 389-DS instance
+        """
+        uri = realm_to_ldapi_uri(realm_name)
+        return cls(uri, start_tls=False, cacert=None, **kwargs)
+
+    @classmethod
+    def from_hostname_secure(cls, hostname, cacert=paths.IPA_CA_CRT,
+                             start_tls=True, **kwargs):
+        """Create LDAP or LDAPS connection to a remote 389-DS instance
+
+        This constructor is opinionated and doesn't let you shoot yourself in
+        the foot. It always creates a secure connection. By default it
+        returns a LDAP connection to port 389 and performs STARTTLS using the
+        default CA cert. With start_tls=False, it creates a LDAPS connection
+        to port 636 instead.
+
+        Note: Microsoft AD does not support SASL encryption and integrity
+        verification with a TLS connection. For AD, use a plain connection
+        with GSSAPI and a MIN_SSF >= 56. SASL GSSAPI and SASL GSS SPNEGO
+        ensure data integrity and confidentiality with SSF > 1. Also see
+        https://msdn.microsoft.com/en-us/library/cc223500.aspx
+        """
+        if start_tls:
+            uri = 'ldap://%s' % format_netloc(hostname, 389)
+        else:
+            uri = 'ldaps://%s' % format_netloc(hostname, 636)
+        return cls(uri, start_tls=start_tls, cacert=cacert, **kwargs)
+
+    @classmethod
+    def from_hostname_plain(cls, hostname, **kwargs):
+        """Create a plain LDAP connection with TLS/SSL
+
+        Note: A plain TLS connection should only be used in combination with
+        GSSAPI bind.
+        """
+        assert 'start_tls' not in kwargs
+        assert 'cacert' not in kwargs
+        uri = 'ldap://%s' % format_netloc(hostname, 389)
+        return cls(uri, **kwargs)
 
     def __str__(self):
         return self.ldap_uri
@@ -785,6 +861,13 @@ class LDAPClient(object):
     @property
     def conn(self):
         return self._conn
+
+    @property
+    def protocol(self):
+        if self.ldap_uri:
+            return self.ldap_uri.split('://', 1)[0]
+        else:
+            return None
 
     def _get_schema(self):
         if self._no_schema:
@@ -897,9 +980,8 @@ class LDAPClient(object):
                 return b'TRUE'
             else:
                 return b'FALSE'
-        elif isinstance(val, (unicode, six.integer_types, Decimal, DN,
-                              Principal)):
-            return six.text_type(val).encode('utf-8')
+        elif isinstance(val, (unicode, int, Decimal, DN, Principal)):
+            return str(val).encode('utf-8')
         elif isinstance(val, DNSName):
             return val.to_text().encode('ascii')
         elif isinstance(val, bytes):
@@ -1016,7 +1098,12 @@ class LDAPClient(object):
         except ldap.NO_SUCH_OBJECT:
             raise errors.NotFound(reason=arg_desc or 'no such entry')
         except ldap.ALREADY_EXISTS:
+            # entry already exists
             raise errors.DuplicateEntry()
+        except ldap.TYPE_OR_VALUE_EXISTS:
+            # attribute type or attribute value already exists, usually only
+            # occurs, when two machines try to write at the same time.
+            raise errors.DuplicateEntry(message=desc)
         except ldap.CONSTRAINT_VIOLATION:
             # This error gets thrown by the uniqueness plugin
             _msg = 'Another entry with the same attribute value already exists'
@@ -1120,10 +1207,13 @@ class LDAPClient(object):
     def _connect(self):
         with self.error_handler():
             conn = ldap_initialize(self.ldap_uri, cacertfile=self._cacert)
-            if self._sasl_nocanon:
-                conn.set_option(ldap.OPT_X_SASL_NOCANON, ldap.OPT_ON)
+            # SASL_NOCANON is set to ON in Fedora's default ldap.conf and
+            # in the ldap_initialize() function.
+            if not self._sasl_nocanon:
+                conn.set_option(ldap.OPT_X_SASL_NOCANON, ldap.OPT_OFF)
 
-            if self._start_tls:
+            if self._start_tls and self.protocol == 'ldap':
+                # STARTTLS applies only to ldap:// connections
                 conn.start_tls_s()
 
         return conn
@@ -1133,6 +1223,9 @@ class LDAPClient(object):
         """
         Perform simple bind operation.
         """
+        if self.protocol == 'ldap' and not self._start_tls and bind_password:
+            # non-empty bind must use a secure connection
+            raise ValueError('simple_bind over insecure LDAP connection')
         with self.error_handler():
             self._flush_schema()
             assert isinstance(bind_dn, DN)
@@ -1157,7 +1250,7 @@ class LDAPClient(object):
         Perform SASL bind operation using the SASL GSSAPI mechanism.
         """
         with self.error_handler():
-            if self._protocol == 'ldapi':
+            if self.protocol == 'ldapi':
                 auth_tokens = SASL_GSS_SPNEGO
             else:
                 auth_tokens = SASL_GSSAPI
@@ -1226,7 +1319,7 @@ class LDAPClient(object):
 
         assert isinstance(filters, (list, tuple))
 
-        filters = [f for f in filters if f]
+        filters = [fx for fx in filters if fx]
         if filters and rules == cls.MATCH_NONE:  # unary operator
             return '(%s%s)' % (cls.MATCH_NONE,
                                cls.combine_filters(filters, cls.MATCH_ANY))
@@ -1271,13 +1364,15 @@ class LDAPClient(object):
             ]
             return cls.combine_filters(flts, rules)
         elif value is not None:
+            if isinstance(value, crypto_x509.Certificate):
+                value = value.public_bytes(serialization.Encoding.DER)
             if isinstance(value, bytes):
                 value = binascii.hexlify(value).decode('ascii')
                 # value[-2:0] is empty string for the initial '\\'
                 value = u'\\'.join(
                     value[i:i+2] for i in six.moves.range(-2, len(value), 2))
             else:
-                value = six.text_type(value)
+                value = str(value)
                 value = ldap.filter.escape_filter_chars(value)
 
             if not exact:

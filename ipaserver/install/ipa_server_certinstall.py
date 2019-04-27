@@ -17,7 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import os
 import os.path
@@ -30,6 +30,7 @@ from ipaplatform.paths import paths
 from ipapython import admintool
 from ipapython.certdb import NSSDatabase, get_ca_nickname
 from ipapython.dn import DN
+from ipapython import ipaldap
 from ipalib import api, errors
 from ipaserver.install import certs, dsinstance, installutils, krbinstance
 
@@ -125,7 +126,7 @@ class ServerCertInstall(admintool.AdminTool):
         api.Backend.ldap2.disconnect()
 
     def install_dirsrv_cert(self):
-        serverid = installutils.realm_to_serverid(api.env.realm)
+        serverid = ipaldap.realm_to_serverid(api.env.realm)
         dirname = dsinstance.config_dirname(serverid)
 
         conn = api.Backend.ldap2
@@ -155,8 +156,15 @@ class ServerCertInstall(admintool.AdminTool):
             ca_chain_fname=paths.IPA_CA_CRT,
             host_name=api.env.host
         )
+
+        key_passwd_path = paths.HTTPD_PASSWD_FILE_FMT.format(host=api.env.host)
+
         req_id = self.replace_key_cert_files(
-            cert, key, paths.HTTPD_CERT_FILE, paths.HTTPD_KEY_FILE, ca_cert,
+            cert, key,
+            cert_fname=paths.HTTPD_CERT_FILE,
+            key_fname=paths.HTTPD_KEY_FILE,
+            ca_cert=ca_cert,
+            passwd_fname=key_passwd_path,
             cmgr_post_command='restart_httpd')
 
         if req_id is not None:
@@ -167,7 +175,7 @@ class ServerCertInstall(admintool.AdminTool):
     def replace_kdc_cert(self):
         # pass in `realm` to perform `NSSDatabase.verify_kdc_cert_validity()`
         cert, key, ca_cert = self.load_pkcs12(
-            ca_chain_fname=paths.CA_BUNDLE_PEM, realm=api.env.realm)
+            ca_chain_fname=paths.CA_BUNDLE_PEM, realm_name=api.env.realm)
 
         self.replace_key_cert_files(
             cert, key, paths.KDC_CERT, paths.KDC_KEY, ca_cert,
@@ -206,7 +214,7 @@ class ServerCertInstall(admintool.AdminTool):
         return cert, key, ca_cert
 
     def replace_key_cert_files(
-        self, cert, key, cert_fname, key_fname, ca_cert,
+        self, cert, key, cert_fname, key_fname, ca_cert, passwd_fname=None,
         profile=None, cmgr_post_command=None
     ):
         try:
@@ -214,8 +222,13 @@ class ServerCertInstall(admintool.AdminTool):
             if ca_enabled:
                 certmonger.stop_tracking(certfile=cert_fname)
 
+            pkey_passwd = None
+            if passwd_fname is not None:
+                with open(passwd_fname, 'rb') as f:
+                    pkey_passwd = f.read()
+
             x509.write_certificate(cert, cert_fname)
-            x509.write_pem_private_key(key, key_fname)
+            x509.write_pem_private_key(key, key_fname, pkey_passwd)
 
             if ca_enabled:
                 # Start tracking only if the cert was issued by IPA CA
@@ -227,12 +240,14 @@ class ServerCertInstall(admintool.AdminTool):
                 if ca_cert == ipa_ca_cert:
                     req_id = certmonger.start_tracking(
                         (cert_fname, key_fname),
+                        pinfile=passwd_fname,
                         storage='FILE',
                         post_command=cmgr_post_command
                     )
                     return req_id
         except RuntimeError as e:
             raise admintool.ScriptError(str(e))
+        return None
 
     def check_chain(self, pkcs12_filename, pkcs12_pin, nssdb):
         # create a temp nssdb

@@ -23,19 +23,17 @@ from optparse import (
     Option, Values, OptionParser, IndentedHelpFormatter, OptionValueError)
 # pylint: enable=deprecated-module
 from copy import copy
+from configparser import SafeConfigParser
+from urllib.parse import urlsplit
 import socket
 import functools
 
-from dns import resolver, rdatatype
 from dns.exception import DNSException
 import dns.name
-# pylint: disable=import-error
-from six.moves.configparser import SafeConfigParser
-from six.moves.urllib.parse import urlsplit
-# pylint: enable=import-error
 
 from ipaplatform.paths import paths
 from ipapython.dn import DN
+from ipapython.dnsutil import query_srv
 from ipapython.ipautil import CheckedIPAddress, CheckedIPAddressLoopback
 
 
@@ -152,7 +150,7 @@ def verify_args(parser, args, needed_args = None):
         parser.error("no %s specified" % needed_list[len_have])
 
 
-class IPAConfig(object):
+class IPAConfig:
     def __init__(self):
         self.default_realm = None
         self.default_server = []
@@ -210,7 +208,7 @@ def __discover_config(discover_server = True):
             name = "_ldap._tcp." + domain
 
             try:
-                servers = resolver.query(name, rdatatype.SRV)
+                servers = query_srv(name)
             except DNSException:
                 # try cycling on domain components of FQDN
                 try:
@@ -225,7 +223,7 @@ def __discover_config(discover_server = True):
                         return False
                     name = "_ldap._tcp.%s" % domain
                     try:
-                        servers = resolver.query(name, rdatatype.SRV)
+                        servers = query_srv(name)
                         break
                     except DNSException:
                         pass
@@ -236,7 +234,7 @@ def __discover_config(discover_server = True):
             if not servers:
                 name = "_ldap._tcp.%s." % config.default_domain
                 try:
-                    servers = resolver.query(name, rdatatype.SRV)
+                    servers = query_srv(name)
                 except DNSException:
                     pass
 

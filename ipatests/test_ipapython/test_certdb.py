@@ -1,15 +1,16 @@
+from __future__ import absolute_import
+
 import os
 
 import pytest
 
 from ipapython.certdb import NSSDatabase, TRUSTED_PEER_TRUST_FLAGS
-from ipaplatform._importhook import metaimporter
+from ipaplatform.osinfo import osinfo
 
-OSRELEASE = metaimporter.parse_osrelease()
 CERTNICK = 'testcert'
 
-if OSRELEASE['ID'] == 'fedora':
-    if int(OSRELEASE['VERSION_ID']) >= 28:
+if osinfo.id == 'fedora':
+    if osinfo.version_number >= (28,):
         NSS_DEFAULT = 'sql'
     else:
         NSS_DEFAULT = 'dbm'

@@ -46,9 +46,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import (
     Encoding, PublicFormat, PrivateFormat, load_pem_private_key
 )
+import pyasn1
 from pyasn1.type import univ, char, namedtype, tag
 from pyasn1.codec.der import decoder, encoder
-# from pyasn1.codec.native import decoder, encoder
 from pyasn1_modules import rfc2315, rfc2459
 import six
 
@@ -83,7 +83,7 @@ SAN_KRB5PRINCIPALNAME = '1.3.6.1.5.2.2'
 
 
 @crypto_utils.register_interface(crypto_x509.Certificate)
-class IPACertificate(object):
+class IPACertificate:
     """
     A proxy class wrapping a python-cryptography certificate representation for
     FreeIPA purposes
@@ -154,7 +154,11 @@ class IPACertificate(object):
         # which are capable of providing python-native types
         ext['extnID'] = univ.ObjectIdentifier(oid)
         ext['critical'] = univ.Boolean(critical)
-        ext['extnValue'] = univ.Any(encoder.encode(univ.OctetString(value)))
+        if pyasn1.__version__.startswith('0.3'):
+            # pyasn1 <= 0.3.7 needs explicit encoding
+            # see https://pagure.io/freeipa/issue/7685
+            value = encoder.encode(univ.OctetString(value))
+        ext['extnValue'] = univ.Any(value)
         ext = encoder.encode(ext)
         return ext
 
@@ -285,7 +289,7 @@ class IPACertificate(object):
             return None
 
         ekurfc = rfc2459.ExtKeyUsageSyntax()
-        for i, oid in enumerate(eku):
+        for i, oid in enumerate(sorted(eku)):
             ekurfc[i] = univ.ObjectIdentifier(oid)
         ekurfc = encoder.encode(ekurfc)
         return self.__encode_extension('2.5.29.37', EKU_ANY not in eku, ekurfc)
@@ -346,8 +350,11 @@ class IPACertificate(object):
         gns = []
         for ext in extensions:
             if ext['extnID'] == OID_SAN:
-                der = decoder.decode(
-                    ext['extnValue'], asn1Spec=univ.OctetString())[0]
+                der = ext['extnValue']
+                if pyasn1.__version__.startswith('0.3'):
+                    # pyasn1 <= 0.3.7 needs explicit unwrap of ANY container
+                    # see https://pagure.io/freeipa/issue/7685
+                    der = decoder.decode(der, asn1Spec=univ.OctetString())[0]
                 gns = decoder.decode(der, asn1Spec=rfc2459.SubjectAltName())[0]
                 break
         return gns
@@ -553,7 +560,7 @@ def write_certificate(cert, filename):
         raise errors.FileError(reason=str(e))
 
 
-def write_certificate_list(certs, filename):
+def write_certificate_list(certs, filename, mode=None):
     """
     Write a list of certificates to a file in PEM format.
 
@@ -563,26 +570,34 @@ def write_certificate_list(certs, filename):
 
     try:
         with open(filename, 'wb') as f:
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
             for cert in certs:
                 f.write(cert.public_bytes(Encoding.PEM))
     except (IOError, OSError) as e:
         raise errors.FileError(reason=str(e))
 
 
-def write_pem_private_key(priv_key, filename):
+def write_pem_private_key(priv_key, filename, passwd=None):
     """
     Write a private key to a file in PEM format. Will force 0x600 permissions
     on file.
 
     :param priv_key: cryptography ``PrivateKey`` object
+    :param passwd: ``bytes`` representing the password to store the
+                    private key with
     """
+    if passwd is not None:
+        enc_alg = serialization.BestAvailableEncryption(passwd)
+    else:
+        enc_alg = serialization.NoEncryption()
     try:
         with open(filename, 'wb') as fp:
             os.fchmod(fp.fileno(), 0o600)
             fp.write(priv_key.private_bytes(
                 Encoding.PEM,
                 PrivateFormat.TraditionalOpenSSL,
-                serialization.NoEncryption()))
+                encryption_algorithm=enc_alg))
     except (IOError, OSError) as e:
         raise errors.FileError(reason=str(e))
 

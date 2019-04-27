@@ -17,9 +17,13 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import, print_function
+
 import logging
+import optparse  # pylint: disable=deprecated-module
 import os
 import shutil
+import sys
 import tempfile
 import time
 import pwd
@@ -39,6 +43,7 @@ from ipaserver.install.replication import (wait_for_task, ReplicationManager,
                                            get_cs_replication_manager)
 from ipaserver.install import installutils
 from ipaserver.install import dsinstance, httpinstance, cainstance, krbinstance
+from ipaserver.masters import get_masters
 from ipapython import ipaldap
 import ipapython.errors
 from ipaplatform.constants import constants
@@ -75,7 +80,7 @@ def recursive_chown(path, uid, gid):
             os.chmod(os.path.join(root, file), 0o640)
 
 
-def decrypt_file(tmpdir, filename, keyring):
+def decrypt_file(tmpdir, filename):
     source = filename
     (dest, ext) = os.path.splitext(filename)
 
@@ -85,19 +90,12 @@ def decrypt_file(tmpdir, filename, keyring):
     dest = os.path.basename(dest)
     dest = os.path.join(tmpdir, dest)
 
-    args = [paths.GPG,
-            '--batch',
-            '-o', dest]
-
-    if keyring is not None:
-        args.append('--no-default-keyring')
-        args.append('--keyring')
-        args.append(keyring + '.pub')
-        args.append('--secret-keyring')
-        args.append(keyring + '.sec')
-
-    args.append('-d')
-    args.append(source)
+    args = [
+        paths.GPG2,
+        '--batch',
+        '--output', dest,
+        '--decrypt', source,
+    ]
 
     result = run(args, raiseonerr=False)
     if result.returncode != 0:
@@ -147,8 +145,12 @@ class Restore(admintool.AdminTool):
         paths.DNSSEC_TOKENS_DIR,
     ]
 
-    FILES_TO_BE_REMOVED = [
-        paths.HTTPD_NSS_CONF,
+    FILES_TO_BE_REMOVED = []
+
+    # files listed here cannot be removed and these files will be
+    # replaced with zero-length files
+    FILES_TO_BE_CLEARED = [
+        paths.HTTPD_NSS_CONF
     ]
 
     def __init__(self, options, args):
@@ -159,21 +161,30 @@ class Restore(admintool.AdminTool):
     def add_options(cls, parser):
         super(Restore, cls).add_options(parser, debug_option=True)
 
-        parser.add_option("-p", "--password", dest="password",
+        parser.add_option(
+            "-p", "--password", dest="password",
             help="Directory Manager password")
-        parser.add_option("--gpg-keyring", dest="gpg_keyring",
-            help="The gpg key name to be used")
-        parser.add_option("--data", dest="data_only", action="store_true",
+        parser.add_option(
+            "--gpg-keyring", dest="gpg_keyring",
+            help=optparse.SUPPRESS_HELP)
+        parser.add_option(
+            "--data", dest="data_only", action="store_true",
             default=False, help="Restore only the data")
-        parser.add_option("--online", dest="online", action="store_true",
-            default=False, help="Perform the LDAP restores online, for data only.")
-        parser.add_option("--instance", dest="instance",
+        parser.add_option(
+            "--online", dest="online", action="store_true",
+            default=False,
+            help="Perform the LDAP restores online, for data only.")
+        parser.add_option(
+            "--instance", dest="instance",
             help="The 389-ds instance to restore (defaults to all found)")
-        parser.add_option("--backend", dest="backend",
+        parser.add_option(
+            "--backend", dest="backend",
             help="The backend to restore within the instance or instances")
-        parser.add_option('--no-logs', dest="no_logs", action="store_true",
+        parser.add_option(
+            '--no-logs', dest="no_logs", action="store_true",
             default=False, help="Do not restore log files from the backup")
-        parser.add_option('-U', '--unattended', dest="unattended",
+        parser.add_option(
+            '-U', '--unattended', dest="unattended",
             action="store_true", default=False,
             help="Unattended restoration never prompts the user")
 
@@ -199,15 +210,21 @@ class Restore(admintool.AdminTool):
             parser.error("must provide path to backup directory")
 
         if options.gpg_keyring:
-            if (not os.path.exists(options.gpg_keyring + '.pub') or
-                    not os.path.exists(options.gpg_keyring + '.sec')):
-                parser.error("no such key %s" % options.gpg_keyring)
+            print(
+                "--gpg-keyring is no longer supported, use GNUPGHOME "
+                "environment variable to use a custom GnuPG2 directory.",
+                file=sys.stderr
+            )
 
 
     def ask_for_options(self):
         options = self.options
         super(Restore, self).ask_for_options()
 
+        # no IPA config means we are reinstalling from nothing so
+        # there is no need for the DM password
+        if not os.path.exists(paths.IPA_DEFAULT_CONF):
+            return
         # get the directory manager password
         self.dirman_password = options.password
         if not options.password:
@@ -307,6 +324,28 @@ class Restore(admintool.AdminTool):
                     not user_input("Continue to restore?", False)):
                 raise admintool.ScriptError("Aborted")
 
+        # Check have optional dependencies been installed for extra
+        # features from backup
+        if restore_type == 'FULL':
+            if 'ADTRUST' in self.backup_services:
+                if not adtrustinstance or not adtrustinstance.check_inst():
+                    raise admintool.ScriptError(
+                        "Backup includes AD trust feature, it requires '{}' "
+                        "package. Please install the package and "
+                        "run ipa-restore again.".format(
+                            constants.IPA_ADTRUST_PACKAGE_NAME
+                        )
+                    )
+            if 'DNS' in self.backup_services:
+                if not os.path.isfile(paths.IPA_DNS_INSTALL):
+                    raise admintool.ScriptError(
+                        "Backup includes Integrated DNS feature, it requires "
+                        "'{}' package. Please install the package and "
+                        "run ipa-restore again.".format(
+                            constants.IPA_DNS_PACKAGE_NAME
+                        )
+                    )
+
         pent = pwd.getpwnam(constants.DS_USER)
 
         # Temporary directory for decrypting files before restoring
@@ -325,7 +364,7 @@ class Restore(admintool.AdminTool):
         try:
             dirsrv = services.knownservices.dirsrv
 
-            self.extract_backup(options.gpg_keyring)
+            self.extract_backup()
 
             if restore_type == 'FULL':
                 self.restore_default_conf()
@@ -392,6 +431,7 @@ class Restore(admintool.AdminTool):
             # We do either a full file restore or we restore data.
             if restore_type == 'FULL':
                 self.remove_old_files()
+                self.clear_old_files()
                 self.cert_restore_prepare()
                 self.file_restore(options.no_logs)
                 self.cert_restore()
@@ -433,7 +473,7 @@ class Restore(admintool.AdminTool):
                 oddjobd.start()
                 http.remove_httpd_ccaches()
                 # have the daemons pick up their restored configs
-                run([paths.SYSTEMCTL, "--system", "daemon-reload"])
+                tasks.systemd_daemon_reload()
         finally:
             try:
                 os.chdir(cwd)
@@ -448,7 +488,7 @@ class Restore(admintool.AdminTool):
         '''
         Create an ldapi connection and bind to it using autobind as root.
         '''
-        instance_name = installutils.realm_to_serverid(api.env.realm)
+        instance_name = ipaldap.realm_to_serverid(api.env.realm)
 
         if not services.knownservices.dirsrv.is_running(instance_name):
             raise admintool.ScriptError(
@@ -458,8 +498,7 @@ class Restore(admintool.AdminTool):
         if self._conn is not None:
             return self._conn
 
-        ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=api.env.realm)
-        self._conn = ipaldap.LDAPClient(ldap_uri)
+        self._conn = ipaldap.LDAPClient.from_realm(api.env.realm)
 
         try:
             self._conn.external_bind()
@@ -481,16 +520,7 @@ class Restore(admintool.AdminTool):
             logger.error('Unable to get connection, skipping disabling '
                          'agreements: %s', e)
             return
-        masters = []
-        dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
-        try:
-            entries = conn.get_entries(dn, conn.SCOPE_ONELEVEL)
-        except Exception as e:
-            raise admintool.ScriptError(
-                "Failed to read master data: %s" % e)
-        else:
-            masters = [ent.single_value['cn'] for ent in entries]
-
+        masters = get_masters(conn)
         for master in masters:
             if master == api.env.host:
                 continue
@@ -503,7 +533,8 @@ class Restore(admintool.AdminTool):
                                 master, e)
                 continue
 
-            master_dn = DN(('cn', master), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+            master_dn = DN(('cn', master), api.env.container_masters,
+                           api.env.basedn)
             try:
                 services = repl.conn.get_entries(master_dn,
                                                  repl.conn.SCOPE_ONELEVEL)
@@ -595,10 +626,13 @@ class Restore(admintool.AdminTool):
             logger.info("Waiting for LDIF to finish")
             wait_for_task(conn, dn)
         else:
+            template_dir = paths.VAR_LOG_DIRSRV_INSTANCE_TEMPLATE % instance
             try:
-                os.makedirs(paths.VAR_LOG_DIRSRV_INSTANCE_TEMPLATE % instance)
+                os.makedirs(template_dir)
             except OSError as e:
                 pass
+            # Restore SELinux context of template_dir
+            tasks.restore_context(template_dir)
 
             args = [paths.LDIF2DB,
                     '-Z', instance,
@@ -668,7 +702,7 @@ class Restore(admintool.AdminTool):
         '''
         Restore paths.IPA_DEFAULT_CONF to temporary directory.
 
-        Primary purpose of this method is to get cofiguration for api
+        Primary purpose of this method is to get configuration for api
         finalization when restoring ipa after uninstall.
         '''
         cwd = os.getcwd()
@@ -705,6 +739,17 @@ class Restore(admintool.AdminTool):
             except OSError as e:
                 if e.errno != 2:  # 2: file does not exist
                     logger.warning("Could not remove file: %s (%s)", f, e)
+
+    def clear_old_files(self):
+        """
+        Replace exist files that cannot be removed with zero-length files
+        before backup
+        """
+        for f in self.FILES_TO_BE_CLEARED:
+            if os.access(f, os.W_OK):
+                open(f, 'w').close()
+            else:
+                logger.warning('Could not open file for writing: %s', f)
 
     def file_restore(self, nologs=False):
         '''
@@ -752,8 +797,7 @@ class Restore(admintool.AdminTool):
         self.backup_services = config.get('ipa', 'services').split(',')
         # pylint: enable=no-member
 
-
-    def extract_backup(self, keyring=None):
+    def extract_backup(self):
         '''
         Extract the contents of the tarball backup into a temporary location,
         decrypting if necessary.
@@ -774,7 +818,7 @@ class Restore(admintool.AdminTool):
 
         if encrypt:
             logger.info('Decrypting %s', filename)
-            filename = decrypt_file(self.dir, filename, keyring)
+            filename = decrypt_file(self.dir, filename)
 
         os.chdir(self.dir)
 
@@ -849,7 +893,7 @@ class Restore(admintool.AdminTool):
         httpinstance.HTTPInstance().stop_tracking_certificates()
         try:
             dsinstance.DsInstance().stop_tracking_certificates(
-                installutils.realm_to_serverid(api.env.realm))
+                ipaldap.realm_to_serverid(api.env.realm))
         except (OSError, IOError):
             # When IPA is not installed, DS NSS DB does not exist
             pass
@@ -880,5 +924,20 @@ class Restore(admintool.AdminTool):
         api.bootstrap(in_server=True, context='restore', **overrides)
         api.finalize()
 
-        self.instances = [installutils.realm_to_serverid(api.env.realm)]
+        self.instances = [ipaldap.realm_to_serverid(api.env.realm)]
         self.backends = ['userRoot', 'ipaca']
+
+        # no IPA config means we are reinstalling from nothing so
+        # there is nothing to test the DM password against.
+        if os.path.exists(paths.IPA_DEFAULT_CONF):
+            instance_name = ipapython.ipaldap.realm_to_serverid(api.env.realm)
+            if not services.knownservices.dirsrv.is_running(instance_name):
+                raise admintool.ScriptError(
+                    "directory server instance is not running"
+                )
+            try:
+                ReplicationManager(api.env.realm, api.env.host,
+                                   self.dirman_password)
+            except errors.ACIError:
+                logger.error("Incorrect Directory Manager password provided")
+                raise

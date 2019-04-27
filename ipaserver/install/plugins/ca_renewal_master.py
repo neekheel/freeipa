@@ -17,15 +17,18 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import logging
 
-from ipaserver.install import installutils, cainstance
+from ipaserver.install import cainstance
 from ipalib import errors
 from ipalib import Updater
 from ipalib.install import certmonger
 from ipalib.plugable import Registry
 from ipaplatform.paths import paths
 from ipapython.dn import DN
+from ipapython import directivesetter
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +47,7 @@ class update_ca_renewal_master(Updater):
             return False, []
 
         ldap = self.api.Backend.ldap2
-        base_dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
-                     self.api.env.basedn)
+        base_dn = DN(self.api.env.container_masters, self.api.env.basedn)
         dn = DN(('cn', 'CA'), ('cn', self.api.env.host), base_dn)
         filter = '(&(cn=CA)(ipaConfigString=caRenewalMaster))'
         try:
@@ -106,7 +108,7 @@ class update_ca_renewal_master(Updater):
         else:
             logger.debug("certmonger request for RA cert not found")
 
-            config = installutils.get_directive(
+            config = directivesetter.get_directive(
                 paths.CA_CS_CFG_PATH, 'subsystem.select', '=')
 
             if config == 'New':

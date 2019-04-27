@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 # Copyright (C) 2007  Red Hat
 # see file 'COPYING' for use and warranty information
 #
@@ -65,6 +64,7 @@ if __name__ == '__main__':
             "install": ["ipaplatform"],
             "otptoken_yubikey": ["python-yubico", "pyusb"],
             "csrgen": ["cffi", "jinja2"],
+            "ldap": ["python-ldap"],  # ipapython.ipaldap
         },
         zip_safe=False,
     )

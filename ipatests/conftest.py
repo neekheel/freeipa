@@ -5,7 +5,9 @@ from __future__ import print_function
 
 import os
 import pprint
+import shutil
 import sys
+import tempfile
 
 import pytest
 
@@ -25,14 +27,14 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 pytest_plugins = [
-    'ipatests.pytest_plugins.additional_config',
-    'ipatests.pytest_plugins.beakerlib',
-    'ipatests.pytest_plugins.declarative',
-    'ipatests.pytest_plugins.nose_compat',
+    'ipatests.pytest_ipa.additional_config',
+    'ipatests.pytest_ipa.beakerlib',
+    'ipatests.pytest_ipa.declarative',
+    'ipatests.pytest_ipa.nose_compat',
 ]
 # The integration plugin is not available in client-only builds.
 if ipaserver is not None:
-    pytest_plugins.append('ipatests.pytest_plugins.integration')
+    pytest_plugins.append('ipatests.pytest_ipa.integration')
 
 
 MARKERS = [
@@ -56,7 +58,7 @@ NO_RECURSE_DIRS = [
     # install/share/wsgi.py
     'install/share',
     # integration plugin imports from ipaplatform
-    'ipatests/pytest_plugins',
+    'ipatests/pytest_ipa',
 ]
 
 
@@ -130,12 +132,29 @@ def pytest_cmdline_main(config):
 
 
 def pytest_runtest_setup(item):
-    if isinstance(item, item.Function):
-        if item.get_marker('skip_ipaclient_unittest'):
+    if isinstance(item, pytest.Function):
+        # pytest 3.6 has deprecated get_marker in 3.6. The method was
+        # removed in 4.x and replaced with get_closest_marker.
+        if hasattr(item, 'get_closest_marker'):
+            get_marker = item.get_closest_marker  # pylint: disable=no-member
+        else:
+            get_marker = item.get_marker  # pylint: disable=no-member
+        if get_marker('skip_ipaclient_unittest'):
             # pylint: disable=no-member
             if pytest.config.option.ipaclient_unittests:
                 pytest.skip("Skip in ipaclient unittest mode")
-        if item.get_marker('needs_ipaapi'):
+        if get_marker('needs_ipaapi'):
             # pylint: disable=no-member
             if pytest.config.option.skip_ipaapi:
                 pytest.skip("Skip tests that needs an IPA API")
+
+
+@pytest.fixture
+def tempdir(request):
+    tempdir = tempfile.mkdtemp()
+
+    def fin():
+        shutil.rmtree(tempdir)
+
+    request.addfinalizer(fin)
+    return tempdir
